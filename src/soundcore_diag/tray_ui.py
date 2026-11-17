@@ -12,7 +12,18 @@ import traceback
 from dataclasses import dataclass
 
 from soundcore_diag import tray_win32 as w
-from soundcore_diag.tray_model import GLYPHS, STEPS, TITLE, TONES, Notice, state_view
+from soundcore_diag.tray_model import (
+    BEAN_BODY,
+    BEAN_CLIP,
+    CLIP_SHADE,
+    GLYPHS,
+    STEPS,
+    TITLE,
+    TONES,
+    Notice,
+    shade,
+    state_view,
+)
 
 FONT_FACE = "Microsoft YaHei UI"
 WM_ENABLE_DISMISS = w.WM_APP + 10
@@ -158,8 +169,18 @@ class Canvas:
         self.round_rect(cx - radius, cy - radius, radius * 2.0, radius * 2.0, radius, fill=fill)
 
     def badge(self, x: float, y: float, size: float, tone: str) -> None:
-        """A tone-coloured disc with its white glyph, as on the tray icon."""
-        self.disc(x + size / 2.0, y + size / 2.0, size / 2.0, TONES.get(tone, TONES["idle"]))
+        """The tone-coloured bean with its white glyph, as on the tray icon."""
+        rgb = TONES.get(tone, TONES["idle"])
+        clip_cx, clip_top, clip_w, clip_h, clip_r = BEAN_CLIP
+        self.round_rect(
+            x + (clip_cx - clip_w / 2.0) * size, y + clip_top * size, clip_w * size, clip_h * size,
+            clip_r * size, fill=shade(rgb, CLIP_SHADE),
+        )
+        body_cx, body_cy, body_r = BEAN_BODY
+        self.disc(x + body_cx * size, y + body_cy * size, body_r * size, rgb)
+        x = x + (body_cx - body_r) * size
+        y = y + (body_cy - body_r) * size
+        size = body_r * 2.0 * size
         for shape in GLYPHS.get(tone, ()):
             if shape[0] == "bar":
                 _kind, cx, cy, width, height = shape
@@ -258,7 +279,12 @@ class PanelModel:
 class PanelView:
     """Layout and drawing of the tray panel, in pixels of one DPI."""
 
-    WIDTH = 320
+    WIDTH = 264
+    PAD = 12
+    BADGE = 32
+    BUTTON = 30
+    ROW = 28
+    FOOTER = (("settings", "声音设置"), ("exit", "退出"))
 
     def __init__(self, dpi: int, dark: bool) -> None:
         self.dpi = dpi
@@ -288,24 +314,25 @@ class PanelView:
 
     def layout(self, hdc, model: PanelModel) -> int:
         s = self.s
-        pad = s(16)
+        pad = s(self.PAD)
         _tone, _headline, hint, view = self.content(model)
         inner = self.width - pad * 2
-        y = pad + s(40) + s(16)
+        y = pad + s(self.BADGE) + s(12)
         self._step_y = y
-        y += s(4) + s(6) + s(16) + s(12)
-        _w, hint_h = measure_text(hdc, self.fonts.get(13), hint, inner)
-        hint_h = max(hint_h, s(18))
+        y += s(3) + s(4) + s(14) + s(8)
+        _w, hint_h = measure_text(hdc, self.fonts.get(12), hint, inner)
+        hint_h = max(hint_h, s(16))
         self._hint_box = (pad, y, pad + inner, y + hint_h)
-        y += hint_h + s(14)
-        items = [("primary", (pad, y, pad + inner, y + s(36)), view.button_enabled)]
-        y += s(36) + s(12)
+        y += hint_h + s(10)
+        items = [("primary", (pad, y, pad + inner, y + s(self.BUTTON)), view.button_enabled)]
+        y += s(self.BUTTON) + s(8)
         self._divider_y = y
-        y += max(1, s(1)) + s(6)
-        for name in ("settings", "exit"):
-            items.append((name, (s(6), y, self.width - s(6), y + s(34)), True))
-            y += s(34)
-        y += s(6)
+        y += max(1, s(1)) + s(4)
+        half = (self.width - s(4) * 2) // 2
+        for index, (name, _label) in enumerate(self.FOOTER):
+            left = s(4) + half * index
+            items.append((name, (left, y, left + half, y + s(self.ROW)), True))
+        y += s(self.ROW) + s(4)
         self.items = items
         self.height = y
         return y
@@ -322,20 +349,21 @@ class PanelView:
         self.layout(hdc, model)
         s = self.s
         t = self.theme
-        pad = s(16)
+        pad = s(self.PAD)
+        badge = s(self.BADGE)
         inner = self.width - pad * 2
         tone, headline, hint, view = self.content(model)
         tone_rgb = TONES.get(tone, TONES["idle"])
 
         fill_background(hdc, self.width, max(self.height, surface), t.bg)
         canvas = Canvas(hdc)
-        canvas.badge(pad, pad, s(40), tone)
+        canvas.badge(pad, pad, badge, tone)
 
-        gap = s(6)
+        gap = s(4)
         seg_w = (inner - gap * 2) / 3.0
         for index in range(3):
             canvas.round_rect(
-                pad + index * (seg_w + gap), self._step_y, seg_w, s(4), s(2),
+                pad + index * (seg_w + gap), self._step_y, seg_w, s(3), s(1.5),
                 fill=tone_rgb if index < view.step else t.track,
             )
 
@@ -343,23 +371,23 @@ class PanelView:
         active = enabled and hover == 0
         down = active and pressed == 0
         if not enabled:
-            canvas.round_rect(left, top, right - left, bottom - top, s(6), fill=t.track)
+            canvas.round_rect(left, top, right - left, bottom - top, s(5), fill=t.track)
         elif view.button_primary:
             fill = t.accent_pressed if down else t.accent_hover if active else t.accent
-            canvas.round_rect(left, top, right - left, bottom - top, s(6), fill=fill)
+            canvas.round_rect(left, top, right - left, bottom - top, s(5), fill=fill)
         else:
             fill = t.button_pressed if down else t.button_hover if active else t.button
             canvas.round_rect(
-                left, top, right - left, bottom - top, s(6),
+                left, top, right - left, bottom - top, s(5),
                 fill=fill, stroke=t.button_border, stroke_width=max(1, s(1)),
             )
 
         canvas.round_rect(pad, self._divider_y, inner, max(1, s(1)), 0, fill=t.divider)
-        for index in (1, 2):
+        for index in range(1, len(self.items)):
             if hover == index:
                 _n, (left, top, right, bottom), _e = self.items[index]
                 canvas.round_rect(
-                    left, top + s(1), right - left, bottom - top - s(2), s(5),
+                    left, top, right - left, bottom - top, s(5),
                     fill=t.pressed if pressed == index else t.hover,
                 )
         canvas.finish()
@@ -367,30 +395,32 @@ class PanelView:
             draw_frame(hdc, self.width, self.height, t.border)
 
         line = w.DT_SINGLELINE | w.DT_VCENTER | w.DT_END_ELLIPSIS
-        text_x = pad + s(40) + s(12)
+        text_x = pad + badge + s(10)
         right_edge = self.width - pad
-        draw_text(hdc, self.fonts.get(12), TITLE, (text_x, pad, right_edge, pad + s(16)), t.text2, line)
+        title_h = s(13)
+        draw_text(hdc, self.fonts.get(11), TITLE, (text_x, pad, right_edge, pad + title_h), t.text2, line)
+        head_top, head_bottom = pad + title_h, pad + badge + s(2)
         elapsed_w = 0
         if model.elapsed:
-            font = self.fonts.get(13)
+            font = self.fonts.get(12)
             elapsed_w, _h = measure_text(hdc, font, model.elapsed, inner, wrap=False)
             draw_text(
                 hdc, font, model.elapsed,
-                (right_edge - elapsed_w, pad + s(16), right_edge, pad + s(42)), t.text2, line | w.DT_RIGHT,
+                (right_edge - elapsed_w, head_top, right_edge, head_bottom), t.text2, line | w.DT_RIGHT,
             )
             elapsed_w += s(8)
         draw_text(
-            hdc, self.fonts.get(18, bold=True), headline,
-            (text_x, pad + s(16), right_edge - elapsed_w, pad + s(42)), t.text, line,
+            hdc, self.fonts.get(15, bold=True), headline,
+            (text_x, head_top, right_edge - elapsed_w, head_bottom), t.text, line,
         )
-        label_y = self._step_y + s(4) + s(6)
+        label_y = self._step_y + s(3) + s(4)
         for index, label in enumerate(STEPS):
             x = pad + index * (seg_w + gap)
             draw_text(
-                hdc, self.fonts.get(12), label, (x, label_y, x + seg_w, label_y + s(16)),
+                hdc, self.fonts.get(11), label, (x, label_y, x + seg_w, label_y + s(14)),
                 t.text if index < view.step else t.text3, line,
             )
-        draw_text(hdc, self.fonts.get(13), hint, self._hint_box, t.text2, w.DT_WORDBREAK)
+        draw_text(hdc, self.fonts.get(12), hint, self._hint_box, t.text2, w.DT_WORDBREAK)
 
         _name, box, enabled = self.items[0]
         if not enabled:
@@ -399,16 +429,18 @@ class PanelView:
             color = t.on_accent
         else:
             color = t.text
-        draw_text(hdc, self.fonts.get(14), view.button, box, color, line | w.DT_CENTER)
-        for index, label in ((1, "打开声音设置"), (2, "退出")):
-            _n, (left, top, right, bottom), _e = self.items[index]
-            draw_text(hdc, self.fonts.get(14), label, (pad, top, right - s(10), bottom), t.text, line)
+        draw_text(hdc, self.fonts.get(13), view.button, box, color, line | w.DT_CENTER)
+        for index, (_name, label) in enumerate(self.FOOTER, start=1):
+            _n, item_box, _e = self.items[index]
+            draw_text(hdc, self.fonts.get(12), label, item_box, t.text2, line | w.DT_CENTER)
 
 
 class ToastView:
     """Layout and drawing of the notification card."""
 
-    MAX_WIDTH = 360
+    MAX_WIDTH = 300
+    PAD = 10
+    BADGE = 26
 
     def __init__(self, dpi: int, dark: bool, notice: Notice) -> None:
         self.dpi = dpi
@@ -428,40 +460,41 @@ class ToastView:
 
     def layout(self, hdc) -> tuple[int, int]:
         s = self.s
-        pad = s(14)
-        badge = s(32)
-        text_x = pad + badge + s(12)
-        max_text = s(self.MAX_WIDTH) - text_x - s(18)
-        title_w, title_h = measure_text(hdc, self.fonts.get(14, bold=True), self.notice.title, max_text, wrap=False)
-        title_h = max(title_h, s(20))
+        pad = s(self.PAD)
+        badge = s(self.BADGE)
+        text_x = pad + s(2) + badge + s(10)
+        max_text = s(self.MAX_WIDTH) - text_x - s(14)
+        title_w, title_h = measure_text(hdc, self.fonts.get(13, bold=True), self.notice.title, max_text, wrap=False)
+        title_h = max(title_h, s(18))
         body_w = body_h = 0
         if self.notice.body:
-            body_w, body_h = measure_text(hdc, self.fonts.get(13), self.notice.body, max_text)
-        text_w = max(min(title_w, max_text), body_w, s(120))
-        text_h = title_h + (s(3) + body_h if body_h else 0)
+            body_w, body_h = measure_text(hdc, self.fonts.get(12), self.notice.body, max_text)
+        text_w = max(min(title_w, max_text), body_w, s(110))
+        text_h = title_h + (s(2) + body_h if body_h else 0)
         self.height = max(pad * 2 + badge, pad * 2 + text_h)
-        self.width = text_x + text_w + s(18)
+        self.width = text_x + text_w + s(14)
         top = (self.height - text_h) // 2
         self._title_box = (text_x, top, text_x + text_w, top + title_h)
-        self._body_box = (text_x, top + title_h + s(3), text_x + text_w, top + text_h)
+        self._body_box = (text_x, top + title_h + s(2), text_x + text_w, top + text_h)
         return self.width, self.height
 
     def paint(self, hdc, rounded: bool = True) -> None:
         self.layout(hdc)
         s = self.s
         t = self.theme
+        badge = s(self.BADGE)
         fill_background(hdc, self.width, self.height, t.bg)
         canvas = Canvas(hdc)
-        canvas.badge(s(14), (self.height - s(32)) / 2.0, s(32), self.notice.tone)
+        canvas.badge(s(self.PAD) + s(2), (self.height - badge) / 2.0, badge, self.notice.tone)
         canvas.finish()
         if not rounded:
             draw_frame(hdc, self.width, self.height, t.border)
         draw_text(
-            hdc, self.fonts.get(14, bold=True), self.notice.title, self._title_box, t.text,
+            hdc, self.fonts.get(13, bold=True), self.notice.title, self._title_box, t.text,
             w.DT_SINGLELINE | w.DT_VCENTER | w.DT_END_ELLIPSIS,
         )
         if self.notice.body:
-            draw_text(hdc, self.fonts.get(13), self.notice.body, self._body_box, t.text2, w.DT_WORDBREAK)
+            draw_text(hdc, self.fonts.get(12), self.notice.body, self._body_box, t.text2, w.DT_WORDBREAK)
 
 
 def _key(hwnd) -> int:
