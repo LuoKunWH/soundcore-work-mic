@@ -71,6 +71,8 @@ NIN_SELECT = 0x0400
 NIN_KEYSELECT = 0x0401
 WM_CONTEXTMENU = 0x007B
 WM_LBUTTONDBLCLK = 0x0203
+WM_MENU_ENABLE_DISMISS = WM_APP + 10
+TRAY_CLICK_GUARD_SEC = 0.4
 
 NIM_ADD = 0
 NIM_MODIFY = 1
@@ -166,6 +168,7 @@ class TRACKMOUSEEVENT(ctypes.Structure):
         ("hwndTrack", wintypes.HWND),
         ("dwHoverTime", wintypes.DWORD),
     ]
+
 
 
 user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
@@ -490,9 +493,10 @@ class TrayMenu:
         user32.UpdateWindow(self.hwnd)
         # HWND_TOPMOST = -1
         user32.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0043)
+        self.owner._open_menu = self
         self.owner._bring_to_foreground(self.hwnd)
-        # Enable click-outside dismiss only after the menu has been activated.
-        user32.PostMessageW(self.hwnd, WM_APP + 10, 0, 0)
+        # Enable click-outside dismiss only after the opening click has settled.
+        user32.PostMessageW(self.hwnd, WM_MENU_ENABLE_DISMISS, 0, 0)
 
         msg = MSG()
         while self.hwnd and user32.IsWindow(self.hwnd):
@@ -519,6 +523,8 @@ class TrayMenu:
     def _close(self, cmd: int = 0) -> None:
         if cmd:
             self.cmd = cmd
+        if getattr(self.owner, "_open_menu", None) is self:
+            self.owner._open_menu = None
         hwnd = self.hwnd
         self.hwnd = None
         if hwnd and user32.IsWindow(hwnd):
@@ -644,11 +650,11 @@ class TrayMenu:
                 if item["kind"] == "item" and item["enabled"]:
                     self._close(item["id"])
                 return 0
-        if msg == WM_APP + 10:
+        if msg == WM_MENU_ENABLE_DISMISS:
             self._can_dismiss = True
             return 0
         if msg == WM_ACTIVATE:
-            if (wparam & 0xFFFF) == WA_INACTIVE and getattr(self, "_can_dismiss", False):
+            if (wparam & 0xFFFF) == WA_INACTIVE and self._can_dismiss:
                 self._close(0)
             return 0
         if msg == WM_DESTROY:
@@ -884,6 +890,8 @@ class TrayApp:
         self.lock = threading.Lock()
         self._toast = None
         self._menu_open = False
+        self._open_menu = None
+        self._ignore_tray_until = 0.0
         self._log_path = Path(__file__).resolve().parents[2] / "tray.log"
         self.icons = {
             "idle": _load_icon("tray-idle.ico"),
@@ -1153,13 +1161,30 @@ class TrayApp:
     def _popup(self) -> None:
         # Native TrackPopupMenu on this machine draws a blank white box
         # (separator only). Draw a custom menu with explicit dark text.
+        now = time.monotonic()
+        if now < getattr(self, "_ignore_tray_until", 0.0):
+            return
         if getattr(self, "_menu_open", False):
+            # A later click on the tray icon dismisses the open menu.
+            # Ignore trailing events from the same click that opened it
+            # (NIN_SELECT, button-up, and context-menu can arrive together).
+            menu = getattr(self, "_open_menu", None)
+            if menu is not None and getattr(menu, "_can_dismiss", False):
+                self._log("popup toggle-close")
+                menu._close(0)
+                self._ignore_tray_until = time.monotonic() + TRAY_CLICK_GUARD_SEC
             return
         self._menu_open = True
+        # Hold off additional tray events from this same click.
+        self._ignore_tray_until = now + TRAY_CLICK_GUARD_SEC
         try:
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
-            cmd = TrayMenu(self).show(pt.x, pt.y)
+            menu = TrayMenu(self)
+            self._open_menu = menu
+            self._log("popup open")
+            cmd = menu.show(pt.x, pt.y)
+            self._log(f"popup close cmd={cmd}")
             if cmd == ID_START:
                 self._start()
             elif cmd == ID_STOP:
@@ -1167,6 +1192,7 @@ class TrayApp:
             elif cmd == ID_EXIT:
                 self._exit()
         finally:
+            self._open_menu = None
             self._menu_open = False
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
