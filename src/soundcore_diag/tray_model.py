@@ -21,7 +21,21 @@ TONES = {
     "error": 0xE5484D,
 }
 
-# Glyphs drawn in white on a tone-coloured disc, in a unit square.
+# The badge is the bean seen from the front, in a unit square: a round body,
+# and the clip sticking out above it in a darker shade of the same tone.
+# BEAN_BODY is (cx, cy, radius); BEAN_CLIP is (cx, top, width, height, corner).
+BEAN_BODY = (0.50, 0.585, 0.415)
+BEAN_CLIP = (0.50, 0.0, 0.36, 0.40, 0.10)
+CLIP_SHADE = 0.72
+
+
+def shade(rgb: int, factor: float) -> int:
+    r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+    return (int(r * factor) << 16) | (int(g * factor) << 8) | int(b * factor)
+
+
+# Glyphs drawn in white on the bean body, in a unit square that is mapped
+# onto the body's bounding box.
 # ("bar", cx, cy, width, height) is a capsule; ("dot", cx, cy, radius) a circle.
 GLYPHS = {
     "idle": (("bar", 0.50, 0.50, 0.44, 0.12),),

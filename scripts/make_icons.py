@@ -19,13 +19,15 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from soundcore_diag.tray_model import GLYPHS, TONES  # noqa: E402
+from soundcore_diag.tray_model import BEAN_BODY, BEAN_CLIP, CLIP_SHADE, GLYPHS, TONES, shade  # noqa: E402
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 SS = 8  # supersampling factor
 WHITE = (255, 255, 255, 255)
 APP_TOP = (0x4F, 0x83, 0xFF)
 APP_BOTTOM = (0x24, 0x4C, 0xE0)
+APP_CLIP = (0xD3, 0xDD, 0xF2, 255)
+APP_GRILLE = (0xC4, 0xCB, 0xD8, 255)
 LABELS = (("idle", "未连接"), ("connect", "正在连接"), ("wait", "请按录音键"), ("run", "正在传声"))
 CJK_FONTS = (
     "C:/Windows/Fonts/msyh.ttc",
@@ -69,11 +71,46 @@ def _glyph(draw: ImageDraw.ImageDraw, tone: str, size: int, box: tuple[float, fl
             draw.ellipse((left * SS, top * SS, (left + d) * SS - 1, (top + d) * SS - 1), fill=fill)
 
 
+def _same_parity(value: float, side: int) -> int:
+    """value rounded to an integer that centres on a side of `side` pixels."""
+    whole = round(value)
+    return whole if (side - whole) % 2 == 0 else whole + (1 if value > whole else -1)
+
+
+def _bean(
+    draw: ImageDraw.ImageDraw, size: int, origin: tuple[float, float], side: int, body_fill, clip_fill
+) -> tuple[float, float, float]:
+    """Draw the bean filling the square of `side` pixels at `origin`.
+
+    Returns the body's bounding square (x, y, side) for the glyph.
+    """
+    clip_cx, clip_top, clip_w, clip_h, clip_r = BEAN_CLIP
+    body_cx, body_cy, body_r = BEAN_BODY
+    if size <= 32:
+        d = _same_parity(body_r * 2 * side, side)
+        cw = _same_parity(clip_w * side, side)
+        ch = round(clip_h * side)
+    else:
+        d, cw, ch = body_r * 2 * side, clip_w * side, clip_h * side
+    x0, y0 = origin
+    left = x0 + body_cx * side - d / 2
+    top = y0 + round((body_cy + body_r) * side) - d
+    clip_left = x0 + clip_cx * side - cw / 2
+    clip_y = y0 + clip_top * side
+    draw.rounded_rectangle(
+        (clip_left * SS, clip_y * SS, (clip_left + cw) * SS - 1, (clip_y + ch) * SS - 1),
+        radius=clip_r * side * SS, fill=clip_fill,
+    )
+    draw.ellipse((left * SS, top * SS, (left + d) * SS - 1, (top + d) * SS - 1), fill=body_fill)
+    return left, top, d
+
+
 def badge(tone: str, size: int) -> Image.Image:
     big = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(big)
-    draw.ellipse((0, 0, size * SS - 1, size * SS - 1), fill=_rgb(TONES[tone]))
-    _glyph(draw, tone, size, (0, 0, size), WHITE)
+    rgb = TONES[tone]
+    body = _bean(draw, size, (0, 0), size, _rgb(rgb), _rgb(shade(rgb, CLIP_SHADE)))
+    _glyph(draw, tone, size, body, WHITE)
     return big.resize((size, size), Image.LANCZOS)
 
 
@@ -94,13 +131,21 @@ def app_icon(size: int) -> Image.Image:
     big = Image.new("RGBA", (full, full), (0, 0, 0, 0))
     big.paste(gradient, (0, 0), mask)
     draw = ImageDraw.Draw(big)
-    if size < 32:
-        _glyph(draw, "run", size, (0, 0, size), WHITE)
-    else:
-        disc = round(size * 0.60)
-        offset = (size - disc) / 2
-        draw.ellipse((offset * SS, offset * SS, (offset + disc) * SS - 1, (offset + disc) * SS - 1), fill=WHITE)
-        _glyph(draw, "run", size, (offset, offset, disc), APP_BOTTOM + (255,))
+    side = round(size * (0.80 if size < 32 else 0.68))
+    offset = (size - side) / 2
+    if size <= 32:
+        offset = round(offset)
+    body = _bean(draw, size, (offset, offset), side, WHITE, APP_CLIP)
+    if size >= 24:
+        _glyph(draw, "run", size, body, APP_BOTTOM + (255,))
+    if size >= 48:
+        x, y, d = body
+        for cy in (0.12, 0.88):
+            gw, gh = d * 0.20, d * 0.05
+            gx, gy = x + d / 2 - gw / 2, y + d * cy - gh / 2
+            draw.rounded_rectangle(
+                (gx * SS, gy * SS, (gx + gw) * SS - 1, (gy + gh) * SS - 1), radius=gh / 2 * SS, fill=APP_GRILLE
+            )
     return big.resize((size, size), Image.LANCZOS)
 
 
