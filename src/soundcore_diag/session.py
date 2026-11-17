@@ -2,7 +2,13 @@
 
 Allowed transmit order:
   01/01, then 2E/01, then at most one 1A/07 for the file id from 1A/06,
-  then in cleanup one 1A/11 if that 1A/07 was sent.
+  then one 1A/11 if that 1A/07 was sent.
+
+With rearm, a transfer the device ends with 1A/0A (the user paused or
+stopped the recording on the device) is closed with its 1A/11 and the
+session waits on the same connection for the next 1A/06. Each 1A/06 allows
+one more 1A/07. Slices of the same file that were already played are not
+played again.
 
 1A/11 stops the transfer. This session never builds a recording-control frame.
 """
@@ -84,6 +90,7 @@ class _Runner:
         command_timeout: float,
         sink=None,
         stop=None,
+        on_rearm=None,
     ):
         self.link = link
         self.decoder = decoder
@@ -92,6 +99,9 @@ class _Runner:
         self.command_timeout = command_timeout
         self.sink = sink
         self._stop = stop
+        self._on_rearm = on_rearm
+        self._peer_finished = False
+        self._played: dict[int, int] = {}
         self.buffer = bytearray()
         self.pending: deque[Packet] = deque()
         self.crypto = SessionCrypto()
@@ -211,6 +221,7 @@ class _Runner:
                 pcm_deadline = min(pcm_deadline, self.deadline)
         expected: int | None = None
         head_ready = False
+        played_up_to = self._played.get(file_id, 0)
         while not self._timed_out():
             if self._user_stop():
                 self.result.stop_reason = "stopped"
@@ -273,6 +284,8 @@ class _Runner:
                         self.result.stop_reason = "protocol_error"
                         return
                     expected = (sequence + 1) & 0xFFFFFFFF
+                    if sequence < played_up_to:
+                        continue
                     plain = self.crypto.decrypt_chunk(sequence, blob)
                     if plain is None:
                         self.result.stop_reason = "crypto_failure"
@@ -283,8 +296,11 @@ class _Runner:
                         self.result.stop_reason = "decode_failure"
                         return
                     self._consume_pcm(pcm)
+                    played_up_to = sequence + 1
+                    self._played[file_id] = played_up_to
                 continue
             if packet.cmd_type == 0x1A and packet.cmd_id == 0x0A:
+                self._peer_finished = True
                 self.result.stop_reason = "transfer_finished" if self._pcm_frames else "no_valid_pcm"
                 return
         if self._user_stop():
@@ -327,22 +343,28 @@ class _Runner:
                 self.result.stop_reason = "crypto_failure"
                 return self.result
 
-            file_id = await self._wait_file()
-            if file_id is None:
-                if self._user_stop():
-                    self.result.stop_reason = "stopped"
-                elif self._timed_out():
+            while True:
+                file_id = await self._wait_file()
+                if file_id is None:
+                    if self._user_stop():
+                        self.result.stop_reason = "stopped"
+                    elif self._timed_out():
+                        self.result.stop_reason = "timeout"
+                    else:
+                        self.result.stop_reason = "no_active_file"
+                    return self.result
+                if self._timed_out():
                     self.result.stop_reason = "timeout"
-                else:
-                    self.result.stop_reason = "no_active_file"
-                return self.result
-            if self._timed_out():
-                self.result.stop_reason = "timeout"
-                return self.result
-            await self._write(realtime_request(file_id))
-            self.transfer_started = True
-            await self._stream(file_id)
-            return self.result
+                    return self.result
+                await self._write(realtime_request(file_id))
+                self.transfer_started = True
+                await self._stream(file_id)
+                if self._on_rearm is None or not self._peer_finished:
+                    return self.result
+                await self._stop_transfer()
+                self._peer_finished = False
+                self.active_file_id = None
+                self._on_rearm()
         except _UserStop:
             self.result.stop_reason = "stopped"
             return self.result
@@ -384,12 +406,16 @@ class _Runner:
         self.result.mic_battery_percent = info.mic_battery_percent
         self.result.case_battery_percent = info.case_battery_percent
 
+    async def _stop_transfer(self) -> None:
+        if self.transfer_started and not self.link.closed:
+            self.transfer_started = False
+            await self._write(transfer_stop_request())
+            self.result.transfer_stop_sent = True
+
     async def _cleanup(self) -> None:
         self._fill_levels()
         try:
-            if self.transfer_started and not self.link.closed:
-                await self._write(transfer_stop_request())
-                self.result.transfer_stop_sent = True
+            await self._stop_transfer()
         except Exception:
             pass
         try:
@@ -408,7 +434,11 @@ async def run_diagnostic(
     command_timeout: float = 5.0,
     sink=None,
     stop=None,
+    on_rearm=None,
 ) -> SessionResult:
+    """Run one session. on_rearm, if given, keeps the connection after the
+    device ends a transfer and is called each time the session goes back to
+    waiting for the next recording."""
     runner = _Runner(
         link,
         decoder,
@@ -417,5 +447,6 @@ async def run_diagnostic(
         command_timeout,
         sink=sink,
         stop=stop,
+        on_rearm=on_rearm,
     )
     return await runner.run()

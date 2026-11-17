@@ -3,8 +3,9 @@
 The route is one scan, or one confirmation scan plus one connection to the
 address the operator typed. It sends device info, the ECDH handshake, and one
 realtime transfer request for the file id carried by notification 1A/06.
-Cleanup sends 1A/11 only after that request, then disconnects. It never sends
-recording start, pause, or stop.
+Cleanup sends 1A/11 only after that request, then disconnects. The tray bridge
+keeps the connection when the device ends a transfer, and asks again only
+after the next 1A/06. It never sends recording start, pause, or stop.
 """
 
 from __future__ import annotations
@@ -423,6 +424,9 @@ async def run_cable_session(stop=None, on_status=None) -> int:
                     self._notify()
                 self._inner.write(mono_pcm)
 
+            def rearm(self) -> None:
+                self._sent = False
+
             def close(self) -> None:
                 self._inner.close()
 
@@ -430,6 +434,11 @@ async def run_cable_session(stop=None, on_status=None) -> int:
             status("正在传输声音。请在要用的软件里把麦克风选成 CABLE Output。")
 
         sink = _FirstPcmSink(sink, _on_first_pcm)
+
+        def _on_rearm() -> None:
+            sink.rearm()
+            status("录音已暂停，连接还在。再按一下录音豆上的录音键，就会接着传声。")
+
         from bleak import BleakClient, BleakScanner
 
         flag = {"stop": False}
@@ -482,6 +491,7 @@ async def run_cable_session(stop=None, on_status=None) -> int:
                 command_timeout=5.0,
                 sink=sink,
                 stop=should_stop,
+                on_rearm=_on_rearm,
             )
             _print_result(result)
             reason = _REASONS.get(result.stop_reason, "已停止")

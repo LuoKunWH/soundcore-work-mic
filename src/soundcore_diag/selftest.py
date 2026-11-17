@@ -87,6 +87,7 @@ class _Peer:
         self.file_key = bytes(range(32))
         self.nonce = bytes(range(16))
         self.session_nonce = bytes(range(16, 32))
+        self.transfers = 0
 
     def on_tx(self, frame: bytes) -> list[bytes]:
         cmd = (frame[5], frame[6])
@@ -119,7 +120,18 @@ class _Peer:
                 frames.append(self._slice(0, b"\x33" * 160))
             elif self.mode == "change_file":
                 frames.append(rx_frame(0x1A, 0x06, (file_id + 9).to_bytes(4, "little")))
+            elif self.mode == "pause_resume":
+                # The first transfer is paused on the device after one slice.
+                # The resumed one starts again from slice 0.
+                self.transfers += 1
+                frames.append(self._slice(0, b"\x33" * 160))
+                if self.transfers == 1:
+                    frames.append(rx_frame(0x1A, 0x0A))
+                else:
+                    frames.append(self._slice(1, b"\x34" * 160))
             return frames
+        if cmd == (0x1A, 0x11) and self.mode == "pause_resume" and self.transfers == 1:
+            return [rx_frame(0x1A, 0x06, self.file_id.to_bytes(4, "little"))]
         return []
 
     def _handshake(self, app_public: bytes, mismatch: bool) -> bytes:
@@ -191,7 +203,7 @@ class _CountingSink:
         self.nbytes = 0
 
 
-async def exercise(mode: str, decoder, seconds: float = 0.6, sink=None, stop=None):
+async def exercise(mode: str, decoder, seconds: float = 0.6, sink=None, stop=None, on_rearm=None):
     link = MemoryLink()
     peer = _Peer(mode)
     driver = asyncio.create_task(_drive(link, peer))
@@ -203,6 +215,7 @@ async def exercise(mode: str, decoder, seconds: float = 0.6, sink=None, stop=Non
         command_timeout=0.35,
         sink=sink,
         stop=stop,
+        on_rearm=on_rearm,
     )
     await asyncio.wait_for(driver, 1)
     return link, result
@@ -414,6 +427,23 @@ def run_self_test() -> int:
 
             _link, result = await exercise("change_file", BytesDecoder(silence_pcm), 0.8)
             assert result.stop_reason == "active_file_changed"
+
+            _link, result = await exercise("pause_resume", BytesDecoder(silence_pcm), 0.6)
+            assert result.stop_reason == "transfer_finished"
+            assert result.command_names.count("realtime_active") == 1
+
+            rearms = []
+            link, result = await exercise(
+                "pause_resume", BytesDecoder(silence_pcm), 0.6, on_rearm=lambda: rearms.append(1)
+            )
+            assert result.stop_reason == "duration_cap"
+            assert rearms == [1]
+            assert result.pcm_frames == 2
+            assert result.command_names[2:] == [
+                "realtime_active", "transfer_stop", "realtime_active", "transfer_stop"
+            ]
+            assert (0x18, 0x82) not in result.commands
+            assert link.disconnects == 1
 
             sink = _CountingSink()
             _link, result = await exercise("good", BytesDecoder(silence_pcm), 0.45, sink=sink)

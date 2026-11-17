@@ -129,6 +129,14 @@ def interpret(message: str) -> Notice:
         return Notice(
             "run", "正在传声", "把软件里的麦克风选成 CABLE Output。", state="running", toast=True
         )
+    if text.startswith("录音已暂停"):
+        return Notice(
+            "wait",
+            "录音已暂停",
+            "连接还在。再按一下豆上的录音键，就会接着传声。",
+            state="waiting",
+            toast=True,
+        )
     if "请按下录音豆" in text or "已连上" in text:
         return Notice(
             "wait",
