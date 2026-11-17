@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+tray.log
+*.lnk
+.DS_Store
+Thumbs.db

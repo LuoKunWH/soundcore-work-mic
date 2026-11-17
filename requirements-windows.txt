@@ -1,0 +1,36 @@
+# Windows x64, Python 3.12. Install only these wheels from third_party/wheels.
+# Do not upgrade pip. Do not resolve packages from the network.
+# pip install --require-hashes --no-index --find-links third_party\wheels --no-deps -r requirements-windows.txt
+
+bleak==3.1.0 \
+    --hash=sha256:3cb08e03039f6e477c276252540416b287d4e3de63a86732780ff93a2f6e73ef
+cffi==2.1.1 \
+    --hash=sha256:f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a
+cryptography==50.0.2 \
+    --hash=sha256:7afa5a6602a9f29af1f3a2965f831bae7c9d5d597b7cbb716d41ab3b7d89879c
+pycparser==3.12 \
+    --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+sounddevice==0.5.6 \
+    --hash=sha256:7f4162f514f007b0bf25a3ccfed3f1705bc2ec311888a90232729eec4f57a4f4
+PyOgg==0.6.14a1 \
+    --hash=sha256:40f79b288b3a667309890885f4cf53371163b7dae17eb17567fb24ab467eca26
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+winrt-runtime==4.1.0 \
+    --hash=sha256:01571f68755750d17518009c00ba21c799b4eddac805bf38cb869da08d38a73f
+winrt-windows-devices-bluetooth==4!10.0.28000.2957 \
+    --hash=sha256:e39bcddf747396e2da78cb8c3d00c3e51214e5f1a9dc213fc009434c5264bbea
+winrt-windows-devices-bluetooth-advertisement==4!10.0.28000.2957 \
+    --hash=sha256:ddf2b1bd17e92a63c892273fceb2a4aba3263123cba7be979b51e93ff7d7e32c
+winrt-windows-devices-bluetooth-genericattributeprofile==4!10.0.28000.2957 \
+    --hash=sha256:3e95b316a941106fd8193dead1a31e6abf9f118efceb58da2388e943fcf5f6d8
+winrt-windows-devices-enumeration==4!10.0.28000.2957 \
+    --hash=sha256:0d76f1961bede3dfaf92939ca16edb882daa97bf6481e2dadc8174fec64e7a7e
+winrt-windows-devices-radios==4!10.0.28000.2957 \
+    --hash=sha256:466c47b468c381192218a6f8744d3f2966b43acd710f004bb8a4b4e4e1bcbf88
+winrt-windows-foundation==4!10.0.28000.2957 \
+    --hash=sha256:0669de7ce480806a0f9a46d005837799e37f1738911b54c4bc04788b37974e69
+winrt-windows-foundation-collections==4!10.0.28000.2957 \
+    --hash=sha256:0401c1b6ed512d1fdad8ba1571698e9000ebee6a69781db9a01994ffcc54a503
+winrt-windows-storage-streams==4!10.0.28000.2957 \
+    --hash=sha256:e113832320f2e7f8b09cedfb400cb7eaf0ac769ad1f2038ddbe88801497916c4

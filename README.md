@@ -1,0 +1,169 @@
+# 录音豆麦克风
+
+把 [soundcore Work](https://www.soundcore.com/) 录音豆（型号 D3200）当成 Windows 上的普通麦克风来用。打开托盘程序后，声音会经官方 VB-CABLE 送到会议软件、录音软件或其他需要麦克风的程序里。
+
+这不是安克 / soundcore 的官方软件。程序不会把声音存到电脑，不会转写，也不会擅自改系统默认扬声器或默认麦克风。
+
+## 运行环境
+
+已在下面的环境里实际跑通（声音能进 `CABLE Output`）：
+
+| 项目 | 已验证的版本 |
+| --- | --- |
+| 系统 | Windows 11 64 位（24H2，内部版本 26200） |
+| Python | 3.12.10 64 位 |
+| 录音豆 | soundcore Work（D3200），手机界面固件 `4.92.3.06`，设备信息字段 `04.92` |
+| 虚拟声卡 | 官方 VB-CABLE `VBCABLE_Driver_Pack46` |
+
+使用前需要同时具备：
+
+- **Windows 10 或 11，64 位**，并打开电脑蓝牙。Windows 10 理论上可用，但尚未单独验证。
+- **Python 3.12 64 位**。不要用 32 位，也不要换 3.11 / 3.13（仓库里的依赖包是按 3.12 x64 钉死的）。
+- **官方 VB-CABLE**（见下方安装步骤）。不要用 VB-Audio 的 A+B 或 C+D 套件。
+- 一枚 **soundcore Work（D3200）** 录音豆，电量充足，放在电脑附近。
+- 使用时请先**断开手机**上的飞书、soundcore App 或其他占用这枚豆的连接。同一时间只能有一边连着。
+
+权限说明：
+
+- 安装 VB-CABLE 需要管理员权限，装完必须重启。
+- 安装和运行本程序本身**不需要**管理员。
+- 请在 Windows 里允许桌面应用使用蓝牙。个别软件使用麦克风时，还要在「隐私 > 麦克风」里允许该软件访问。
+
+本程序不支持 macOS、Linux，也不支持把录音豆直接当成系统蓝牙耳机。它走的是录音豆自己的蓝牙协议，再写到虚拟声卡上。
+
+## 安装
+
+分四步：装 Python、装本程序依赖、装官方 VB-CABLE、打开托盘程序。
+
+### 1. 安装 Python 3.12 64 位
+
+到 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/) 安装 **Python 3.12** 的 64 位版本。安装时勾选 **Add python.exe to PATH**。
+
+在 PowerShell 里确认：
+
+```powershell
+py -3.12 -c "import struct,sys; print(sys.version, struct.calcsize('P')*8)"
+```
+
+应看到 `3.12.x` 和 `64`。
+
+### 2. 安装本程序依赖
+
+先取得本仓库，在仓库根目录打开 PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+脚本会：
+
+- 检查是否为 Python 3.12 64 位
+- 在本目录创建独立的 `.venv`，不污染系统 Python
+- 用仓库里的官方 wheel 做离线、哈希校验安装，不升级 pip，不从网上临时解析别的包
+- 运行 `--check-env`（只检查模块和解码器，不会扫描或连接蓝牙）
+- 在桌面创建快捷方式「录音豆麦克风」
+
+如果没有 `py` 启动器，只要 3.12 的 `python.exe` 在常见安装路径里，脚本也会自己找到。
+
+也可以手动安装（效果相同）：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes --no-index --find-links .\third_party\wheels --no-deps -r .\requirements-windows.txt
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m soundcore_diag --check-env
+```
+
+请不要执行 `pip install --upgrade pip`，也不要改用网上最新版依赖。
+
+### 3. 安装官方 VB-CABLE
+
+本仓库**不附带** VB-CABLE 安装包。它是 VB-Audio 的 Donationware，请只从官方页面下载：
+
+[https://vb-audio.com/Cable/](https://vb-audio.com/Cable/)
+
+2026 年 11 月该页面提供的 Windows 包是 `VBCABLE_Driver_Pack46.zip`。厂商步骤是：解压全部文件，以管理员身份运行安装程序，**安装或卸载后都要重启**。
+
+重启后请立刻检查「系统 > 声音」：
+
+- **播放设备**应是你的电脑扬声器。官方安装程序有时会把默认播放改成 `CABLE Input`，请改回扬声器，否则电脑会没声音。
+- **输入设备**可以自己选成 `CABLE Output`。本程序不会替你改默认设备。
+
+装好后，播放列表里应有 `CABLE Input (VB-Audio Virtual Cable)`，录音列表里应有 `CABLE Output (VB-Audio Virtual Cable)`。
+
+### 4. 打开程序
+
+双击桌面上的「录音豆麦克风」，或双击仓库里的 `启动录音豆麦克风.vbs`。右下角托盘会出现图标。若图标藏在任务栏的 `^` 里，可以把它拖到外面。
+
+## 使用方法
+
+1. 断开手机上占用录音豆的连接，把豆放到电脑附近。
+2. 右键托盘图标，点 **开始桥接**。
+3. 按图标颜色操作：
+
+   ![托盘状态颜色](docs/images/tray-states.png)
+
+   - 深灰：未连接
+   - 橙色：正在连接
+   - 蓝色：已经连上，请按一下豆上的录音键
+   - 绿色：正在传输声音，对着豆说话
+
+4. 在要用的软件里，把麦克风选成 **CABLE Output**。
+5. 用完后点 **停止桥接**，再按一下豆上的键，把豆上的录音也停掉。点 **退出** 可关闭托盘程序。
+
+「停止桥接」只停止电脑这边的传输，不会替你结束豆上的物理录音。豆在录音时通常会自己在设备里留下录音文件，这是豆的行为，不是本程序在电脑上存了文件。
+
+如果开始桥接时豆已经在录音，却一直停在蓝色、听不到声音，请先按一下停掉，再按一次开始。
+
+## 常见问题
+
+**托盘提示找不到录音豆。**  
+打开电脑蓝牙，把豆再靠近一些，并确认手机端已经断开。断开后蓝牙地址可能会变，本程序每次都会重新扫描，不用手工填地址。
+
+**图标变蓝了，但系统声音设置里 CABLE Output 没有波动。**  
+还没有开始录音。请按豆上的录音键，等到图标变绿再看音量条。看着设置页的时候也可以对着豆说话。
+
+**图标是绿色，软件里还是没声音。**  
+确认该软件的麦克风选的是 `CABLE Output`，而不是「麦克风阵列」或扬声器。同时检查 Windows「隐私 > 麦克风」是否允许这个软件。
+
+**装完 VB-CABLE 后，电脑扬声器没声音了。**  
+到「系统 > 声音」把默认播放设备改回电脑扬声器。不要把 `CABLE Input` 留作默认播放设备。
+
+**开始桥接后很快就停了。**  
+看托盘提示。常见原因是没找到豆、手机还占着连接，或还没安装 / 没启用 VB-CABLE。本程序不会改默认设备，也不会在失败后自动重连，再点一次「开始桥接」即可。
+
+**可以同时当手机录音和电脑麦克风用吗？**  
+不可以。使用本程序时请让手机先断开。
+
+## 程序不会做的事
+
+- 不升级固件、不解绑、不删除豆里已有的录音
+- 不发送开始 / 停止物理录音的命令（录音键只能你自己按）
+- 不修改系统默认扬声器或默认麦克风
+- 不把声音写到磁盘，不做转写、会议纪要或云同步
+- 不捆绑、不代下载 VB-CABLE 安装包
+
+## 命令行（可选）
+
+日常使用托盘即可。若要在终端里自检或做一次诊断：
+
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m soundcore_diag --check-env
+.\.venv\Scripts\python.exe -m soundcore_diag --self-test
+.\.venv\Scripts\python.exe -m soundcore_diag live --consent --scan
+```
+
+`--scan` 只扫描，不连接。扫描结果里的蓝牙地址请不要发到议题、群聊或对外报告里，地址在断开后还可能变化。
+
+把声音送到 VB-CABLE、由托盘程序自动挑选信号最强的那一枚豆，是推荐用法。更多协议约束见 [docs/协议与限制.md](docs/协议与限制.md)。
+
+## 许可证与第三方
+
+本仓库源码以 [MIT License](LICENSE) 发布。依赖库、解码器和协议参考的许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+协议实现对照的是 MIT 许可的上游 [tacshi/Soundcore](https://github.com/tacshi/Soundcore)（提交 `d296a1c5c0645797ff7cd3b55e93477a99820857`），独立写成 Python，没有复制无许可证仓库中新写的代码。
+
+托盘图标来自 soundcore Work 官方产品图，再做成不同状态的色块。soundcore、Anker 等商标归其权利人所有。VB-CABLE 是 VB-Audio 的产品。本项目与这些公司没有从属或官方合作关系。
+
+请不要设置环境变量 `SD_ENABLE_ASIO`。依赖里的播放库在该变量存在时会换用另一套组件，本程序会因此拒绝打开声卡。
