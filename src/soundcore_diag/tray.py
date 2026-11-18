@@ -2,7 +2,9 @@
 
 Start and stop the bridge from the tray. The bridge does not change the
 system default playback or recording devices; the default recording device
-changes only when the user picks 「录音豆」 or 「系统麦克风」 in the panel.
+switches to the bean when sound starts flowing, back to the system
+microphone when the bridge ends, and when the user picks 「录音豆」 or
+「系统麦克风」 in the panel.
 It never prints Bluetooth addresses in the user-facing notifications.
 """
 
@@ -200,8 +202,12 @@ class TrayApp:
         if self.mics is not None and self.mics.current == "system":
             self._system_mic = self.mics.default_id
 
-    def _switch_mic(self, target: str) -> None:
-        """Make the bean (CABLE Output) or the system microphone the default."""
+    def _switch_mic(self, target: str, manual: bool = True) -> None:
+        """Make the bean (CABLE Output) or the system microphone the default.
+
+        A failed switch opens the sound settings only when the user asked
+        for it; the automatic switches just log it.
+        """
         from soundcore_diag import mic_switch
 
         self._read_mics()
@@ -212,9 +218,9 @@ class TrayApp:
         if endpoint is None:
             return
         ok = mic_switch.set_default(endpoint.id)
-        self._log(f"mic switch target={target} ok={ok}")
+        self._log(f"mic switch target={target} manual={manual} ok={ok}")
         self._read_mics()
-        if not ok:
+        if not ok and manual:
             self.w.shell32.ShellExecuteW(None, "open", SOUND_SETTINGS, None, None, 1)
 
     def _show_toast(self, notice: model.Notice) -> None:
@@ -256,6 +262,7 @@ class TrayApp:
                 if notice.state == "running":
                     if self.state != "running":
                         self.run_started = time.monotonic()
+                        self._switch_mic("bean", manual=False)
                     self.state = "running"
                 elif notice.state == "waiting":
                     self.state = "waiting"
@@ -315,6 +322,7 @@ class TrayApp:
         self.worker = None
         # Show any last real status first, then return the icon to idle.
         self._drain_status()
+        self._switch_mic("system", manual=False)
         self._set_state("idle")
 
     def _bring_to_foreground(self, hwnd=None) -> None:
@@ -412,6 +420,7 @@ class TrayApp:
             worker = self.worker
             if worker is not None:
                 worker.join(8)
+            self._switch_mic("system", manual=False)
         if self._toast is not None:
             self._toast.close()
             self._toast = None
