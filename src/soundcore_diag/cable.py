@@ -63,6 +63,14 @@ def is_standard_cable_input(name: str) -> bool:
     return not any(token in folded for token in banned)
 
 
+def is_standard_cable_output(name: str) -> bool:
+    folded = " ".join(name.lower().replace("(", " ").replace(")", " ").split())
+    if not folded.startswith("cable output"):
+        return False
+    banned = ("cable a", "cable b", "cable c", "cable d", "hi-fi", "hifi", "asio")
+    return not any(token in folded for token in banned)
+
+
 def select_cable_input(devices: list[OutputDevice]) -> CableSelection:
     matches = []
     for device in devices:
