@@ -74,7 +74,7 @@ STATE_VIEWS = {
         "wait", "请按录音键", "按一下豆上的录音键，灯变色后就可以说话。", 2, "停止桥接", False
     ),
     "running": StateView(
-        "run", "正在传声", "把软件里的麦克风选成 CABLE Output。", 3, "停止桥接", False
+        "run", "正在传声", "麦克风选「录音豆」，软件里就能用它说话。", 3, "停止桥接", False
     ),
     "stopping": StateView("connect", "正在停止…", "正在断开，请稍等。", 0, "正在停止…", False, False),
 }
@@ -141,7 +141,7 @@ def interpret(message: str) -> Notice:
     # rest is carried by the icon, the tooltip and the panel.
     if "正在传输声音" in text:
         return Notice(
-            "run", "正在传声", "把软件里的麦克风选成 CABLE Output。", state="running", toast=True
+            "run", "正在传声", "麦克风选「录音豆」，软件里就能用它说话。", state="running", toast=True
         )
     if text.startswith("录音已暂停"):
         return Notice(
