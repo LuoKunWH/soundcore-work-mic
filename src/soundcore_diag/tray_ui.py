@@ -52,19 +52,20 @@ class Theme:
     accent_hover: int
     accent_pressed: int
     on_accent: int
+    segment: int
 
 
 LIGHT = Theme(
     bg=0xF9F9F9, text=0x1A1A1A, text2=0x5C5C5C, text3=0x9A9A9A,
     divider=0xE6E6E6, border=0xD4D4D4, hover=0xEDEDED, pressed=0xE4E4E4, track=0xE2E2E2,
     button=0xFFFFFF, button_hover=0xF4F4F4, button_pressed=0xEBEBEB, button_border=0xD9D9D9,
-    accent=0x2F6BFF, accent_hover=0x2860E8, accent_pressed=0x2255CF, on_accent=0xFFFFFF,
+    accent=0x2F6BFF, accent_hover=0x2860E8, accent_pressed=0x2255CF, on_accent=0xFFFFFF, segment=0xFFFFFF,
 )
 DARK = Theme(
     bg=0x2B2B2B, text=0xFFFFFF, text2=0xC6C6C6, text3=0x858585,
     divider=0x3B3B3B, border=0x484848, hover=0x383838, pressed=0x333333, track=0x434343,
     button=0x383838, button_hover=0x414141, button_pressed=0x353535, button_border=0x4A4A4A,
-    accent=0x6C9BFF, accent_hover=0x7CA6FF, accent_pressed=0x5F8CEB, on_accent=0x0B1530,
+    accent=0x6C9BFF, accent_hover=0x7CA6FF, accent_pressed=0x5F8CEB, on_accent=0x0B1530, segment=0x5A5A5A,
 )
 
 
@@ -274,6 +275,9 @@ class PanelModel:
     state: str = "idle"
     notice: Notice | None = None
     elapsed: str = ""
+    mic: str = ""
+    # (bean available, system microphone available); None hides the switch.
+    mic_options: tuple[bool, bool] | None = None
 
 
 class PanelView:
@@ -284,7 +288,9 @@ class PanelView:
     BADGE = 32
     BUTTON = 30
     ROW = 28
+    SWITCH = 168
     FOOTER = (("settings", "声音设置"), ("exit", "退出"))
+    MIC = (("mic_bean", "录音豆"), ("mic_system", "系统麦克风"))
 
     def __init__(self, dpi: int, dark: bool) -> None:
         self.dpi = dpi
@@ -296,6 +302,7 @@ class PanelView:
         self._hint_box = (0, 0, 0, 0)
         self._step_y = 0
         self._divider_y = 0
+        self._mic_row: tuple[int, int, int, int] | None = None
 
     def s(self, px: float) -> int:
         return int(round(px * self.dpi / 96.0))
@@ -326,6 +333,16 @@ class PanelView:
         y += hint_h + s(10)
         items = [("primary", (pad, y, pad + inner, y + s(self.BUTTON)), view.button_enabled)]
         y += s(self.BUTTON) + s(8)
+        self._mic_row = None
+        if model.mic_options is not None:
+            row = s(self.ROW)
+            left = pad + inner - s(self.SWITCH)
+            self._mic_row = (pad, y, left, y + row)
+            half = s(self.SWITCH) // 2
+            for index, (name, _label) in enumerate(self.MIC):
+                box = (left + half * index, y, pad + inner if index else left + half, y + row)
+                items.append((name, box, model.mic_options[index]))
+            y += row + s(8)
         self._divider_y = y
         y += max(1, s(1)) + s(4)
         half = (self.width - s(4) * 2) // 2
@@ -382,10 +399,25 @@ class PanelView:
                 fill=fill, stroke=t.button_border, stroke_width=max(1, s(1)),
             )
 
+        if self._mic_row is not None:
+            _l, top, track_left, bottom = self._mic_row
+            canvas.round_rect(track_left, top, pad + inner - track_left, bottom - top, s(6), fill=t.track)
+            inset = s(2)
+            for index, (name, (left, top, right, bottom), enabled) in enumerate(self.items):
+                if not name.startswith("mic_"):
+                    continue
+                box = (left + inset, top + inset, right - left - inset * 2, bottom - top - inset * 2)
+                if name == f"mic_{model.mic}":
+                    canvas.round_rect(
+                        *box, s(5), fill=t.segment, stroke=t.button_border, stroke_width=max(1, s(1))
+                    )
+                elif enabled and hover == index:
+                    canvas.round_rect(*box, s(5), fill=t.pressed if pressed == index else t.hover)
+
         canvas.round_rect(pad, self._divider_y, inner, max(1, s(1)), 0, fill=t.divider)
-        for index in range(1, len(self.items)):
-            if hover == index:
-                _n, (left, top, right, bottom), _e = self.items[index]
+        footer = {name for name, _label in self.FOOTER}
+        for index, (name, (left, top, right, bottom), _e) in enumerate(self.items):
+            if name in footer and hover == index:
                 canvas.round_rect(
                     left, top, right - left, bottom - top, s(5),
                     fill=t.pressed if pressed == index else t.hover,
@@ -430,9 +462,17 @@ class PanelView:
         else:
             color = t.text
         draw_text(hdc, self.fonts.get(13), view.button, box, color, line | w.DT_CENTER)
-        for index, (_name, label) in enumerate(self.FOOTER, start=1):
-            _n, item_box, _e = self.items[index]
-            draw_text(hdc, self.fonts.get(12), label, item_box, t.text2, line | w.DT_CENTER)
+        labels = dict(self.FOOTER + self.MIC)
+        if self._mic_row is not None:
+            draw_text(hdc, self.fonts.get(12), "麦克风", self._mic_row, t.text2, line)
+        for name, item_box, enabled in self.items[1:]:
+            if not name.startswith("mic_"):
+                color = t.text2
+            elif not enabled:
+                color = t.text3
+            else:
+                color = t.text if name == f"mic_{model.mic}" else t.text2
+            draw_text(hdc, self.fonts.get(12), labels[name], item_box, color, line | w.DT_CENTER)
 
 
 class ToastView:
@@ -665,6 +705,9 @@ class PanelWindow:
                 self.owner._start()
             else:
                 self.owner._request_stop()
+            self.refresh()
+        elif name.startswith("mic_"):
+            self.owner._switch_mic(name[len("mic_"):])
             self.refresh()
         else:
             self._close(name)
