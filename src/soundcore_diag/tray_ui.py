@@ -8,6 +8,7 @@ about the bridge: they draw a state name, an optional notice and a timer.
 from __future__ import annotations
 
 import ctypes
+import time
 import traceback
 from dataclasses import dataclass
 
@@ -27,6 +28,10 @@ from soundcore_diag.tray_model import (
 
 FONT_FACE = "Microsoft YaHei UI"
 WM_ENABLE_DISMISS = w.WM_APP + 10
+WM_CLICKED_OUTSIDE = w.WM_APP + 11
+# After an outside click closes the panel, the same click may reach the tray
+# icon; ignore tray events this long so it does not reopen at once.
+DISMISS_GUARD_SEC = 0.4
 TIMER_TICK = 1
 TIMER_LIFE = 1
 TIMER_FADE_IN = 2
@@ -564,6 +569,10 @@ _PANEL_PROC = _route(_PANELS)
 _TOAST_PROC = _route(_TOASTS)
 
 
+def _contains(rect, x: int, y: int) -> bool:
+    return rect is not None and rect.left <= x < rect.right and rect.top <= y < rect.bottom
+
+
 def _mouse_xy(lparam: int) -> tuple[int, int]:
     return ctypes.c_short(lparam & 0xFFFF).value, ctypes.c_short((lparam >> 16) & 0xFFFF).value
 
@@ -593,6 +602,9 @@ class PanelWindow:
         self._edge = 0
         self._grow_up = True
         self._last_elapsed = ""
+        self._anchor = None
+        self._hook = None
+        self._hook_proc = w.HOOKPROC(self._on_mouse)
 
     def show(self, anchor, cursor) -> str:
         if anchor is not None:
@@ -638,6 +650,8 @@ class PanelWindow:
         )
         self.owner._open_menu = self
         self.owner._bring_to_foreground(self.hwnd)
+        self._anchor = anchor
+        self._hook = w.user32.SetWindowsHookExW(w.WH_MOUSE_LL, self._hook_proc, w.kernel32.GetModuleHandleW(None), 0)
         w.user32.SetTimer(self.hwnd, TIMER_TICK, 500, None)
         # Enable click-outside dismiss only after the opening click has settled.
         w.user32.PostMessageW(self.hwnd, WM_ENABLE_DISMISS, 0, 0)
@@ -673,7 +687,33 @@ class PanelWindow:
             )
         w.user32.InvalidateRect(hwnd, None, False)
 
+    def _on_mouse(self, code, wparam, lparam):
+        """Global mouse hook. The panel only closes on deactivation if it
+        became the foreground window, which Windows does not always allow, so
+        a press anywhere outside the panel closes it too. Presses on the tray
+        icon are left to the tray, which toggles the panel itself."""
+        try:
+            if code >= 0 and wparam in (w.WM_LBUTTONDOWN, w.WM_RBUTTONDOWN, w.WM_MBUTTONDOWN):
+                hwnd = self.hwnd
+                if hwnd and self._can_dismiss:
+                    info = ctypes.cast(ctypes.c_void_p(lparam), ctypes.POINTER(w.MSLLHOOKSTRUCT)).contents
+                    x, y = info.pt.x, info.pt.y
+                    rect = w.RECT()
+                    w.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                    if not _contains(rect, x, y) and not _contains(self._anchor, x, y):
+                        w.user32.PostMessageW(hwnd, WM_CLICKED_OUTSIDE, 0, 0)
+        except Exception:
+            pass
+        return w.user32.CallNextHookEx(self._hook, code, wparam, lparam)
+
+    def _unhook(self) -> None:
+        hook = self._hook
+        self._hook = None
+        if hook:
+            w.user32.UnhookWindowsHookEx(hook)
+
     def _close(self, cmd: str = "") -> None:
+        self._unhook()
         if cmd:
             self.cmd = cmd
         if getattr(self.owner, "_open_menu", None) is self:
@@ -689,6 +729,7 @@ class PanelWindow:
         w.user32.PostMessageW(self.owner.hwnd, w.WM_NULL, 0, 0)
 
     def _cleanup(self) -> None:
+        self._unhook()
         if self.view is not None:
             self.view.close()
             self.view = None
@@ -784,6 +825,11 @@ class PanelWindow:
             return 0
         if msg == WM_ENABLE_DISMISS:
             self._can_dismiss = True
+            return 0
+        if msg == WM_CLICKED_OUTSIDE:
+            if self._can_dismiss:
+                self.owner._ignore_tray_until = time.monotonic() + DISMISS_GUARD_SEC
+                self._close()
             return 0
         if msg == w.WM_ACTIVATE:
             if (wparam & 0xFFFF) == w.WA_INACTIVE and self._can_dismiss:
