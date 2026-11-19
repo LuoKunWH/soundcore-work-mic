@@ -12,6 +12,7 @@ gdi32 = ctypes.windll.gdi32
 
 LRESULT = ctypes.c_ssize_t
 WNDPROCTYPE = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 WM_NULL = 0x0000
 WM_DESTROY = 0x0002
@@ -27,7 +28,9 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
 WM_MOUSELEAVE = 0x02A3
 WM_PRINTCLIENT = 0x0318
 WM_APP = 0x8000
@@ -87,6 +90,7 @@ IDI_APPLICATION = 32512
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x0010
 MONITOR_DEFAULTTONEAREST = 2
+WH_MOUSE_LL = 14
 TME_LEAVE = 0x00000002
 ERROR_ALREADY_EXISTS = 183
 
@@ -129,6 +133,16 @@ class POINT(ctypes.Structure):
 
 class RECT(ctypes.Structure):
     _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
 
 
 class PAINTSTRUCT(ctypes.Structure):
@@ -274,6 +288,10 @@ _sig(user32.SetForegroundWindow, wintypes.BOOL, _H)
 _sig(user32.GetForegroundWindow, _H)
 _sig(user32.GetWindowThreadProcessId, wintypes.DWORD, _H, ctypes.POINTER(wintypes.DWORD))
 _sig(user32.AttachThreadInput, wintypes.BOOL, wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+_sig(user32.GetWindowRect, wintypes.BOOL, _H, ctypes.POINTER(RECT))
+_sig(user32.SetWindowsHookExW, wintypes.HHOOK, _INT, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD)
+_sig(user32.UnhookWindowsHookEx, wintypes.BOOL, wintypes.HHOOK)
+_sig(user32.CallNextHookEx, LRESULT, wintypes.HHOOK, _INT, wintypes.WPARAM, wintypes.LPARAM)
 _sig(user32.SetLayeredWindowAttributes, wintypes.BOOL, _H, wintypes.COLORREF, wintypes.BYTE, wintypes.DWORD)
 
 _sig(shell32.Shell_NotifyIconW, wintypes.BOOL, wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW))
