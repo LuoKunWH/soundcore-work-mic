@@ -14,11 +14,11 @@ LIVE = ROOT / "src" / "soundcore_diag" / "live.py"
 
 
 def _live_status_texts() -> list[str]:
-    """Every literal sentence run_cable_session passes to status()."""
+    """Every literal sentence the bridge passes to status()."""
     tree = ast.parse(LIVE.read_text(encoding="utf-8"))
     texts = []
     for func in ast.walk(tree):
-        if isinstance(func, ast.AsyncFunctionDef) and func.name == "run_cable_session":
+        if isinstance(func, ast.AsyncFunctionDef) and func.name in ("run_cable_session", "_connect_nearest"):
             for node in ast.walk(func):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "status" and node.args:
                     arg = node.args[0]
