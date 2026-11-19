@@ -8,6 +8,7 @@ place. Nothing in this module ever carries a Bluetooth address.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 TITLE = "录音豆麦克风"
@@ -209,3 +210,97 @@ def interpret(message: str) -> Notice:
     if any(token in text for token in ("失败", "无法", "没有找到", "没有等到", "没有收到")):
         return _error("桥接已停止", text)
     return Notice("idle", "提示", text, toast=bool(text))
+
+
+# The cleanup window. File ids are the recorder's clock at the start of the
+# recording, in unix seconds; anything before 2020 is not taken as a time.
+EARLIEST_START = 1_577_836_800
+SHORT_MS = 60_000
+
+
+@dataclass(frozen=True)
+class RecordingRow:
+    file_id: int
+    when: str
+    length: str
+    duration_ms: int
+    mic: bool
+    open: bool
+
+
+def format_length(ms: int) -> str:
+    total = max(0, int(ms) // 1000)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def format_start(file_id: int, now: float | None = None) -> str:
+    if file_id < EARLIEST_START:
+        return "时间未知"
+    stamp = time.localtime(file_id)
+    today = time.localtime(time.time() if now is None else now)
+    if stamp.tm_year == today.tm_year and stamp.tm_yday == today.tm_yday:
+        return time.strftime("今天 %H:%M", stamp)
+    if stamp.tm_year == today.tm_year:
+        return time.strftime("%m-%d %H:%M", stamp)
+    return time.strftime("%Y-%m-%d %H:%M", stamp)
+
+
+def recording_rows(recordings, open_id: int, mic_ids, now: float | None = None) -> list[RecordingRow]:
+    """Newest first. The open file is listed (it may not be in the device's
+    list yet) but cannot be selected."""
+    mic = set(mic_ids)
+    durations = {item.file_id: item.duration_ms for item in recordings}
+    if open_id and open_id not in durations:
+        durations[open_id] = 0
+    rows = []
+    for file_id in sorted(durations, reverse=True):
+        ms = durations[file_id]
+        is_open = file_id == open_id
+        rows.append(
+            RecordingRow(
+                file_id,
+                format_start(file_id, now),
+                "录音中" if is_open else format_length(ms),
+                ms,
+                file_id in mic,
+                is_open,
+            )
+        )
+    return rows
+
+
+def total_label(rows) -> str:
+    rows = [row for row in rows if not row.open]
+    if not rows:
+        return "豆里没有录音"
+    minutes = sum(row.duration_ms for row in rows) // 60_000
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        span = f"{hours} 小时 {minutes} 分钟"
+    elif minutes:
+        span = f"{minutes} 分钟"
+    else:
+        span = "不到 1 分钟"
+    return f"{len(rows)} 条，共 {span}"
+
+
+def delete_prompt(rows, everything: bool) -> str:
+    what = "豆里全部录音" if everything else "所选录音"
+    mic = sum(1 for row in rows if row.mic)
+    lines = [f"将从录音豆删除{what}：{total_label(rows)}。"]
+    if mic < len(rows):
+        lines.append(f"其中 {len(rows) - mic} 条不是当麦克风时录的，可能是还没上传的正式录音。")
+    lines.append("删除后不能恢复，飞书里也就收不到这些录音了。确定删除吗？")
+    return "\n\n".join(lines)
+
+
+def delete_outcome(asked: int, deleted: int, left: int) -> str:
+    if deleted == asked:
+        return f"已删除 {deleted} 条，豆里还剩 {left} 条。"
+    if deleted:
+        return f"删除了 {deleted} 条，另有 {asked - deleted} 条没删掉，豆里还剩 {left} 条。"
+    return f"没有删掉。可能是这台豆的固件不支持删除，豆里还剩 {left} 条。"

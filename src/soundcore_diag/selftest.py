@@ -22,18 +22,22 @@ from soundcore_diag.cable import (
 from soundcore_diag.crypto_session import FILE_MAGIC, SessionCrypto, aes_ctr, derive_session_key
 from soundcore_diag.harness import MemoryLink, rx_frame
 from soundcore_diag.opus_pcm import OpusPcmDecoder, OpusUnavailable
+from soundcore_diag import session as session_module
 from soundcore_diag.protocol import (
     ALLOWED_TX,
     ProtocolError,
+    delete_request,
     device_info_request,
     drain_packets,
     encode,
     handshake_request,
+    list_request,
     parse_device_info,
+    parse_recording_page,
     realtime_request,
     transfer_stop_request,
 )
-from soundcore_diag.session import run_diagnostic
+from soundcore_diag.session import CleanupHooks, manage_recordings, run_diagnostic
 
 
 class BytesDecoder:
@@ -88,9 +92,29 @@ class _Peer:
         self.nonce = bytes(range(16))
         self.session_nonce = bytes(range(16, 32))
         self.transfers = 0
+        # Recordings on the simulated device: file id -> duration in ms.
+        self.files: dict[int, int] = {}
+        self.open_id = 0
+        self.keep_on_delete = False
+
+    def _page(self, page: int) -> bytes:
+        ids = sorted(self.files)[page * 10 : page * 10 + 10]
+        payload = bytearray(len(ids).to_bytes(2, "little"))
+        for file_id in ids:
+            payload += file_id.to_bytes(4, "little") + (file_id + 1).to_bytes(4, "little")
+            payload += self.files[file_id].to_bytes(4, "little")
+        payload += self.open_id.to_bytes(4, "little") + bytes(4)
+        return bytes(payload)
 
     def on_tx(self, frame: bytes) -> list[bytes]:
         cmd = (frame[5], frame[6])
+        if cmd == (0x1B, 0x0E):
+            return [rx_frame(0x1B, 0x0E, self._page(int.from_bytes(frame[9:11], "little")))]
+        if cmd == (0x1A, 0x10):
+            file_id = int.from_bytes(frame[9:13], "little")
+            if file_id != self.open_id and not self.keep_on_delete:
+                self.files.pop(file_id, None)
+            return [rx_frame(0x1A, 0x10, b"\x00")]
         if self.mode == "silence":
             return []
         if self.mode == "disconnect":
@@ -120,6 +144,11 @@ class _Peer:
                 frames.append(self._slice(0, b"\x33" * 160))
             elif self.mode == "change_file":
                 frames.append(rx_frame(0x1A, 0x06, (file_id + 9).to_bytes(4, "little")))
+            elif self.mode == "pause_clean":
+                # One recording, ended on the device; the file closes with 1A/0A.
+                self.files[file_id] = 20
+                frames.append(self._slice(0, b"\x33" * 160))
+                frames.append(rx_frame(0x1A, 0x0A))
             elif self.mode == "pause_resume":
                 # The first transfer is paused on the device after one slice.
                 # The resumed one starts again from slice 0.
@@ -203,9 +232,39 @@ class _CountingSink:
         self.nbytes = 0
 
 
-async def exercise(mode: str, decoder, seconds: float = 0.6, sink=None, stop=None, on_rearm=None):
+class _Hooks(CleanupHooks):
+    def __init__(self, on: bool = True, pending=()) -> None:
+        self.on = on
+        self.ids = list(pending)
+        self.removed: set[int] = set()
+
+    def enabled(self) -> bool:
+        return self.on
+
+    def pending(self) -> list[int]:
+        return list(self.ids)
+
+    def streamed(self, file_id: int) -> None:
+        self.ids.append(file_id)
+
+    def gone(self, file_ids: set[int]) -> None:
+        self.removed |= file_ids
+        self.ids = [item for item in self.ids if item not in file_ids]
+
+
+async def recordings(peer: "_Peer", delete=()):
     link = MemoryLink()
-    peer = _Peer(mode)
+    driver = asyncio.create_task(_drive(link, peer))
+    result = await manage_recordings(link, delete=list(delete), command_timeout=0.35)
+    await asyncio.wait_for(driver, 1)
+    return link, result
+
+
+async def exercise(
+    mode: str, decoder, seconds: float = 0.6, sink=None, stop=None, on_rearm=None, cleanup=None, peer=None
+):
+    link = MemoryLink()
+    peer = peer or _Peer(mode)
     driver = asyncio.create_task(_drive(link, peer))
     result = await run_diagnostic(
         link,
@@ -216,6 +275,7 @@ async def exercise(mode: str, decoder, seconds: float = 0.6, sink=None, stop=Non
         sink=sink,
         stop=stop,
         on_rearm=on_rearm,
+        cleanup=cleanup,
     )
     await asyncio.wait_for(driver, 1)
     return link, result
@@ -228,8 +288,11 @@ def _check_allowlist() -> None:
         (0x18, 0x82, b"\x01"),
         (0x18, 0x82, b"\x02"),
         (0x1A, 0x0E, b"\x00\x00"),
-        (0x1B, 0x0E, b"\x00\x00"),
-        (0x1A, 0x10, b"\x01\x00\x00\x00"),
+        (0x1B, 0x0E, b"\x00"),
+        (0x1B, 0x0E, (100).to_bytes(2, "little")),
+        (0x1A, 0x10, b"\x00\x00\x00\x00"),
+        (0x1A, 0x10, b"\x01\x00\x00"),
+        (0x1A, 0x10, b"\x01\x00\x00\x00\x02\x00\x00\x00"),
         (0x1A, 0x0F, b"\x00"),
         (0x1A, 0x05, b"\x00"),
         (0x1A, 0x02, b""),
@@ -259,7 +322,10 @@ def _check_allowlist() -> None:
     assert stop[5:7] == b"\x1a\x11" and stop[9:-1] == b"\x00"
     live = realtime_request(7)
     assert live[9:13] == b"\x00\x00\x00\x00" and live[13:17] == b"\x07\x00\x00\x00" and live[17] == 1
-    assert ALLOWED_TX == {(0x01, 0x01), (0x2E, 0x01), (0x1A, 0x07), (0x1A, 0x11)}
+    assert ALLOWED_TX == {(0x01, 0x01), (0x2E, 0x01), (0x1A, 0x07), (0x1A, 0x11), (0x1B, 0x0E), (0x1A, 0x10)}
+    assert list_request(2)[5:7] == b"\x1b\x0e" and list_request(2)[9:-1] == b"\x02\x00"
+    gone = delete_request(0x6AF57626)
+    assert gone == bytes.fromhex("08EE0000001A100E002676F56A29")
     public = bytes([0x04]) + bytes(64)
     frame = handshake_request(public)
     assert frame[5:7] == b"\x2e\x01" and frame[9:-1] == public
@@ -279,6 +345,15 @@ def _check_parse() -> None:
     buf.extend(raw[5:])
     packets = drain_packets(buf)
     assert len(packets) == 1 and packets[0].payload == (42).to_bytes(4, "little")
+    page = parse_recording_page(
+        (2).to_bytes(2, "little")
+        + (7).to_bytes(4, "little") + bytes(4) + (1500).to_bytes(4, "little")
+        + (9).to_bytes(4, "little") + bytes(4) + (60).to_bytes(4, "little")
+        + (11).to_bytes(4, "little") + bytes(4)
+    )
+    assert page is not None and [(r.file_id, r.duration_ms) for r in page.recordings] == [(7, 1500), (9, 60)]
+    assert page.open_id == 11
+    assert parse_recording_page(b"") is not None and parse_recording_page(b"\x05\x00" + bytes(8)) is None
     refused = rx_frame(0x2E, 0x01, b"\xff", status=1)
     packet = drain_packets(bytearray(refused))[0]
     assert packet.rejected and not packet.success
@@ -470,6 +545,55 @@ def run_self_test() -> int:
 
         asyncio.run(mocks())
         print("拒绝、超时、断开和停止条件: 通过")
+
+        async def cleanup_mocks() -> None:
+            peer = _Peer("good")
+            peer.files = {1000 + index: 1000 * index for index in range(23)}
+            _link, result = await recordings(peer)
+            assert result.listed and len(result.recordings) == 23
+            assert result.commands.count((0x1B, 0x0E)) == 3
+            assert (0x1A, 0x10) not in result.commands and (0x1A, 0x07) not in result.commands
+
+            peer.open_id = 1022
+            _link, result = await recordings(peer, delete=[1001, 1002, 1022, 5])
+            assert result.deleted == {1001, 1002, 5}
+            assert result.commands.count((0x1A, 0x10)) == 2
+            assert 1022 in {r.file_id for r in result.recordings} and len(result.recordings) == 21
+
+            peer.keep_on_delete = True
+            _link, result = await recordings(peer, delete=[1003])
+            assert result.deleted == set() and result.listed
+
+            hooks = _Hooks()
+            link, result = await exercise(
+                "pause_clean", BytesDecoder(silence_pcm), 0.6, on_rearm=lambda: None, cleanup=hooks
+            )
+            assert hooks.removed == {100} and hooks.ids == []
+            assert result.commands.count((0x1A, 0x10)) == 1
+            assert (0x18, 0x82) not in result.commands
+            assert link.disconnects == 1
+
+            hooks = _Hooks(on=False)
+            _link, result = await exercise(
+                "pause_clean", BytesDecoder(silence_pcm), 0.6, on_rearm=lambda: None, cleanup=hooks
+            )
+            assert hooks.ids == [100] and (0x1A, 0x10) not in result.commands
+
+            peer = _Peer("no_audio")
+            peer.files = {40: 500, 41: 600}
+            hooks = _Hooks(pending=[40, 77])
+            _link, result = await exercise(
+                "good", BytesDecoder(silence_pcm), 0.45, cleanup=hooks, peer=peer
+            )
+            assert hooks.removed == {40, 77} and peer.files == {41: 600}
+
+        saved_wait = session_module.OPEN_FILE_WAIT
+        session_module.OPEN_FILE_WAIT = 0.01
+        try:
+            asyncio.run(cleanup_mocks())
+        finally:
+            session_module.OPEN_FILE_WAIT = saved_wait
+        print("录音列表与删除（只删指定的、不删正在录的、删完核对）: 通过")
         native = "未执行"
         try:
             decoder = OpusPcmDecoder()

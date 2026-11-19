@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 tray.log
+tray-settings.json
 *.lnk
 .DS_Store
 Thumbs.db

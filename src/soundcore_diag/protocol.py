@@ -2,14 +2,17 @@
 
 The byte layout follows the MIT-licensed notes and implementation in
 tacshi/Soundcore at d296a1c5c0645797ff7cd3b55e93477a99820857
-(Copyright (c) 2026 Rocky Shi). This module only builds the four transmit
-commands the diagnostic is allowed to send.
+(Copyright (c) 2026 Rocky Shi). The recording list and delete layouts follow
+imraywang/openbean docs/PROTOCOL.md (Apache-2.0), sections 7 and 12a. This
+module only builds the six transmit commands the program is allowed to send.
 
 Transmit:
   01/01  empty payload, device info
   2E/01  65-byte uncompressed P-256 public key
   1A/07  offset 0, realtime flag 1, file id chosen by the caller
   1A/11  payload 00, stop the transfer (not the physical recording)
+  1B/0E  page number, list the recordings on the device (10 per page)
+  1A/10  one nonzero file id, delete that recording from the device
 
 The 5-byte firmware field is returned unchanged. It is not a full version.
 """
@@ -27,7 +30,11 @@ ALLOWED_TX = {
     (0x2E, 0x01),
     (0x1A, 0x07),
     (0x1A, 0x11),
+    (0x1B, 0x0E),
+    (0x1A, 0x10),
 }
+MAX_LIST_PAGES = 100
+LIST_PAGE_SIZE = 10
 
 
 class ProtocolError(Exception):
@@ -62,6 +69,14 @@ def _validate_tx(cmd_type: int, cmd_id: int, payload: bytes) -> None:
         if payload != b"\x00":
             raise ProtocolError("transfer stop payload must be 0x00")
         return
+    if pair == (0x1B, 0x0E):
+        if len(payload) != 2 or int.from_bytes(payload, "little") >= MAX_LIST_PAGES:
+            raise ProtocolError("list request takes one page number below the page cap")
+        return
+    if pair == (0x1A, 0x10):
+        if len(payload) != 4 or int.from_bytes(payload, "little") == 0:
+            raise ProtocolError("delete takes exactly one nonzero file id")
+        return
     raise ProtocolError("command is not allowed")
 
 
@@ -94,6 +109,14 @@ def realtime_request(file_id: int) -> bytes:
 
 def transfer_stop_request() -> bytes:
     return encode(0x1A, 0x11, b"\x00")
+
+
+def list_request(page: int) -> bytes:
+    return encode(0x1B, 0x0E, int(page).to_bytes(2, "little"))
+
+
+def delete_request(file_id: int) -> bytes:
+    return encode(0x1A, 0x10, int(file_id).to_bytes(4, "little"))
 
 
 def assert_tx_frame(frame: bytes) -> None:
@@ -233,6 +256,43 @@ def parse_active_file_id(payload: bytes) -> int | None:
     if file_id <= 0:
         return None
     return file_id
+
+
+@dataclass(frozen=True)
+class Recording:
+    """One recording on the device. The file id is also its start time in
+    unix seconds, as far as the recorder's clock is right."""
+
+    file_id: int
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class RecordingPage:
+    recordings: tuple[Recording, ...]
+    # The file the device still has open (recording or paused), or 0.
+    open_id: int
+
+
+def parse_recording_page(payload: bytes) -> RecordingPage | None:
+    """1B/0E reply: count u16, count x (id, end time, duration ms), then the
+    open file id and its duration. An empty payload is an empty page."""
+    if not payload:
+        return RecordingPage((), 0)
+    if len(payload) < 10:
+        return None
+    count = int.from_bytes(payload[0:2], "little")
+    trailer = 2 + count * 12
+    if count > LIST_PAGE_SIZE * 2 or len(payload) < trailer + 8:
+        return None
+    items = []
+    for index in range(2, trailer, 12):
+        file_id = int.from_bytes(payload[index : index + 4], "little")
+        duration = int.from_bytes(payload[index + 8 : index + 12], "little")
+        if file_id:
+            items.append(Recording(file_id, duration))
+    open_id = int.from_bytes(payload[trailer : trailer + 4], "little")
+    return RecordingPage(tuple(items), open_id)
 
 
 def parse_slices(frame: bytes) -> list[tuple[int, bytes]]:

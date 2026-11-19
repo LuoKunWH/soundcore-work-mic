@@ -5,6 +5,9 @@ system default playback or recording devices; the default recording device
 switches to the bean when sound starts flowing, back to the system
 microphone when the bridge ends, and when the user picks 「录音豆」 or
 「系统麦克风」 in the panel.
+The recordings the bean made while it served as a microphone are deleted
+from the bean after each one ends (if 「停后删录音」 is on), and the cleanup
+window lists and deletes recordings on request, after a confirmation.
 It never prints Bluetooth addresses in the user-facing notifications.
 """
 
@@ -20,12 +23,14 @@ import traceback
 from pathlib import Path
 
 from soundcore_diag import tray_model as model
+from soundcore_diag.recording_store import FILE_NAME, RecordingStore
 from soundcore_diag.tray_model import TITLE
 
 WM_APP = 0x8000
 WM_TRAY = WM_APP + 1
 WM_STATUS = WM_APP + 2
 WM_DONE = WM_APP + 3
+WM_RECORDINGS = WM_APP + 4
 TRAY_CLICK_GUARD_SEC = 0.4
 ID_START = 1001
 ID_STOP = 1002
@@ -69,6 +74,13 @@ class TrayApp:
         self.icons: dict[str, int] = {}
         self.mics = None
         self._system_mic = ""
+        self.store = RecordingStore(_root() / FILE_NAME, log=self._log)
+        self.rec_window = None
+        self.rec_busy = False
+        self.rec_status = ""
+        self.rec_result = None
+        self.rec_asked = 0
+        self._rec_done = None
         self.wndproc = tray_win32.WNDPROCTYPE(self._wndproc)
 
     @staticmethod
@@ -199,10 +211,11 @@ class TrayApp:
         if self.state == "running" and self.run_started:
             elapsed = model.format_elapsed(time.monotonic() - self.run_started)
         mics = self.mics
+        auto = self.store.enabled()
         if mics is None:
-            return self.ui.PanelModel(self.state, self.notice, elapsed)
+            return self.ui.PanelModel(self.state, self.notice, elapsed, auto_clean=auto)
         options = (mics.bean is not None, mics.system(self._system_mic) is not None)
-        return self.ui.PanelModel(self.state, self.notice, elapsed, mics.current, options)
+        return self.ui.PanelModel(self.state, self.notice, elapsed, mics.current, options, auto)
 
     def _read_mics(self) -> None:
         from soundcore_diag import mic_switch
@@ -249,6 +262,7 @@ class TrayApp:
         if state == "running":
             self.run_started = time.monotonic()
         self._refresh()
+        self._refresh_recordings()
 
     def _post_status(self, message: str) -> None:
         with self.lock:
@@ -289,7 +303,96 @@ class TrayApp:
         self._log(f"done code={code}")
         self.w.user32.PostMessageW(self.hwnd, WM_DONE, code & 0xFFFFFFFF, 0)
 
+    def _set_auto_clean(self, value: bool) -> None:
+        self.store.set_enabled(value)
+        self._log(f"auto clean={'on' if value else 'off'}")
+
+    def recordings_model(self):
+        result = self.rec_result
+        rows = ()
+        if result is not None and result.listed:
+            rows = tuple(model.recording_rows(result.recordings, result.open_id, self.store.pending()))
+        blocked = ""
+        if self.state != "idle":
+            blocked = "正在桥接。先在面板里点「停止桥接」，再来整理录音。"
+        return self.ui.RecordingsModel(
+            rows, result is not None and result.listed, self.rec_busy, blocked, self.rec_status
+        )
+
+    def _open_recordings(self) -> None:
+        if self.rec_window is None:
+            self.rec_window = self.ui.RecordingsWindow(self)
+        self.rec_window.show()
+        if self.rec_result is None or not self.rec_result.listed:
+            self.recordings_refresh()
+        else:
+            self.rec_window.refresh()
+
+    def recordings_refresh(self) -> None:
+        self._recordings_job([])
+
+    def recordings_delete(self, file_ids: list[int]) -> None:
+        self._recordings_job(file_ids)
+
+    def _recordings_job(self, file_ids: list[int]) -> None:
+        if self.rec_busy or self.state != "idle":
+            return
+        self.rec_busy = True
+        self.rec_asked = len(file_ids)
+        self.rec_status = "正在连接录音豆…"
+        self._log(f"recordings job delete={len(file_ids)}")
+        self._refresh_recordings()
+
+        def on_status(message: str) -> None:
+            self.rec_status = message
+            self.w.user32.PostMessageW(self.hwnd, WM_RECORDINGS, 0, 0)
+
+        def work() -> None:
+            from soundcore_diag.live import run_recordings
+
+            result = None
+            try:
+                result = asyncio.run(run_recordings(file_ids, stop=lambda: self.stop_flag, on_status=on_status))
+            except Exception:
+                self._log("recordings exception\n" + traceback.format_exc())
+            self._rec_done = result
+            self.w.user32.PostMessageW(self.hwnd, WM_RECORDINGS, 1, 0)
+
+        threading.Thread(target=work, name="soundcore-recordings", daemon=True).start()
+
+    def _recordings_finished(self) -> None:
+        result = self._rec_done
+        self._rec_done = None
+        self.rec_busy = False
+        asked = self.rec_asked
+        self.rec_asked = 0
+        if result is None:
+            if not self.rec_status or self.rec_status.startswith("正在"):
+                self.rec_status = "没有连上录音豆。请靠近电脑、断开手机上的连接后点「刷新」。"
+        elif not result.listed:
+            self._log(f"recordings failed reason={result.stop_reason}")
+            self.rec_status = "录音豆没有回应，读不到录音列表。请点「刷新」再试一次。"
+            if result.deleted:
+                self.store.gone(result.deleted)
+        else:
+            present = {item.file_id for item in result.recordings} | {result.open_id}
+            self.store.gone(result.deleted)
+            self.store.forget_missing(present)
+            self.rec_result = result
+            left = sum(1 for item in result.recordings if item.file_id != result.open_id)
+            self._log(f"recordings listed={len(result.recordings)} asked={asked} deleted={len(result.deleted)}")
+            self.rec_status = model.delete_outcome(asked, len(result.deleted), left) if asked else ""
+        self._refresh_recordings()
+
+    def _refresh_recordings(self) -> None:
+        window = self.rec_window
+        if window is not None and window.is_shown:
+            window.refresh()
+
     def _start(self) -> None:
+        if self.rec_busy:
+            self._show_toast(model.Notice("connect", "正在整理录音", "等这一步做完再开始桥接。", toast=True))
+            return
         if self.state != "idle":
             self._show_toast(model.BUSY)
             return
@@ -317,7 +420,7 @@ class TrayApp:
 
         try:
             self._log("worker start")
-            code = asyncio.run(run_cable_session(stop=stop, on_status=self._on_status))
+            code = asyncio.run(run_cable_session(stop=stop, on_status=self._on_status, cleanup=self.store))
             self._log(f"worker return {code}")
         except Exception:
             self._log("worker exception\n" + traceback.format_exc())
@@ -382,6 +485,8 @@ class TrayApp:
             self._menu_open = False
         if cmd == "settings":
             self.w.shell32.ShellExecuteW(None, "open", SOUND_SETTINGS, None, None, 1)
+        elif cmd == "recordings":
+            self._open_recordings()
         elif cmd == "exit":
             self._exit()
 
@@ -414,6 +519,12 @@ class TrayApp:
         elif msg == WM_DONE:
             self._finish(wparam)
             return 0
+        elif msg == WM_RECORDINGS:
+            if wparam == 1:
+                self._recordings_finished()
+            else:
+                self._refresh_recordings()
+            return 0
         elif msg == w.WM_DESTROY:
             if self.nid is not None:
                 w.shell32.Shell_NotifyIconW(w.NIM_DELETE, ctypes.byref(self.nid))
@@ -430,6 +541,9 @@ class TrayApp:
             if worker is not None:
                 worker.join(8)
             self._switch_mic("system", manual=False)
+        if self.rec_window is not None:
+            self.rec_window.close()
+            self.rec_window = None
         if self._toast is not None:
             self._toast.close()
             self._toast = None
