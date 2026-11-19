@@ -111,8 +111,17 @@ class TrayApp:
         w = self.w
         w.enable_dpi_awareness()
         if self.already_running():
-            w.user32.MessageBoxW(None, f"{TITLE}已经在运行了。\n请在任务栏右下角找到它的图标。", TITLE, 0x40)
+            w.user32.MessageBoxW(
+                None,
+                f"{TITLE}已经在运行了，请在任务栏右下角找到它的图标。\n\n"
+                "如果刚更新过程序，请先点图标，在面板里点「退出」，再重新启动，新版本才会生效。",
+                TITLE,
+                0x40,
+            )
             return 0
+        from soundcore_diag import version
+
+        self._log(f"start {version.label()}")
         self._load_icons()
         hinst = w.kernel32.GetModuleHandleW(None)
         cls = w.WNDCLASSEXW()

@@ -13,6 +13,7 @@ import traceback
 from dataclasses import dataclass
 
 from soundcore_diag import tray_win32 as w
+from soundcore_diag import version
 from soundcore_diag.tray_model import (
     BEAN_BODY,
     BEAN_CLIP,
@@ -27,6 +28,7 @@ from soundcore_diag.tray_model import (
 )
 
 FONT_FACE = "Microsoft YaHei UI"
+VERSION_LABEL = version.label(with_branch=False)
 WM_ENABLE_DISMISS = w.WM_APP + 10
 WM_CLICKED_OUTSIDE = w.WM_APP + 11
 # After an outside click closes the panel, the same click may reach the tray
@@ -435,7 +437,9 @@ class PanelView:
         text_x = pad + badge + s(10)
         right_edge = self.width - pad
         title_h = s(13)
-        draw_text(hdc, self.fonts.get(11), TITLE, (text_x, pad, right_edge, pad + title_h), t.text2, line)
+        title_box = (text_x, pad, right_edge, pad + title_h)
+        draw_text(hdc, self.fonts.get(10), VERSION_LABEL, title_box, t.text3, line | w.DT_RIGHT)
+        draw_text(hdc, self.fonts.get(11), TITLE, title_box, t.text2, line)
         head_top, head_bottom = pad + title_h, pad + badge + s(2)
         elapsed_w = 0
         if model.elapsed:
@@ -652,6 +656,7 @@ class PanelWindow:
         self.owner._bring_to_foreground(self.hwnd)
         self._anchor = anchor
         self._hook = w.user32.SetWindowsHookExW(w.WH_MOUSE_LL, self._hook_proc, w.kernel32.GetModuleHandleW(None), 0)
+        self.owner._log(f"panel hook={'on' if self._hook else 'failed'} foreground={w.user32.GetForegroundWindow() == self.hwnd}")
         w.user32.SetTimer(self.hwnd, TIMER_TICK, 500, None)
         # Enable click-outside dismiss only after the opening click has settled.
         w.user32.PostMessageW(self.hwnd, WM_ENABLE_DISMISS, 0, 0)
@@ -828,6 +833,7 @@ class PanelWindow:
             return 0
         if msg == WM_CLICKED_OUTSIDE:
             if self._can_dismiss:
+                self.owner._log("panel close: clicked outside")
                 self.owner._ignore_tray_until = time.monotonic() + DISMISS_GUARD_SEC
                 self._close()
             return 0
