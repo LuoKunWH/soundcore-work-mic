@@ -10,6 +10,13 @@ session waits on the same connection for the next 1A/06. Each 1A/06 allows
 one more 1A/07. Slices of the same file that were already played are not
 played again.
 
+With cleanup hooks, the bridge also deletes the recordings it streamed as a
+microphone: after the device ends a transfer, and once at the start for any
+left over from an earlier session. It lists the recordings (1B/0E), never
+deletes the file the device still has open, sends one 1A/10 per file, and
+lists again; only a file missing from that second list counts as deleted.
+manage_recordings() uses the same steps for the cleanup window.
+
 1A/11 stops the transfer. This session never builds a recording-control frame.
 """
 
@@ -24,17 +31,23 @@ from dataclasses import dataclass, field
 from soundcore_diag.crypto_session import SessionCrypto
 from soundcore_diag.harness import LinkClosed
 from soundcore_diag.protocol import (
+    LIST_PAGE_SIZE,
+    MAX_LIST_PAGES,
     DeviceInfo,
     Packet,
     ProtocolError,
+    Recording,
     assert_tx_frame,
+    delete_request,
     device_info_request,
     drain_packets,
     handshake_request,
+    list_request,
     parse_active_file_id,
     parse_device_info,
     parse_file_head,
     parse_handshake,
+    parse_recording_page,
     parse_slices,
     realtime_request,
     transfer_stop_request,
@@ -45,7 +58,12 @@ COMMAND_NAMES = {
     (0x2E, 0x01): "handshake",
     (0x1A, 0x07): "realtime_active",
     (0x1A, 0x11): "transfer_stop",
+    (0x1B, 0x0E): "list",
+    (0x1A, 0x10): "delete",
 }
+# The device may close a file a moment after it ends the transfer.
+OPEN_FILE_RETRIES = 2
+OPEN_FILE_WAIT = 1.0
 
 
 @dataclass
@@ -72,6 +90,34 @@ class SessionResult:
         return [COMMAND_NAMES.get(item, "blocked") for item in self.commands]
 
 
+@dataclass
+class RecordingsResult:
+    stop_reason: str
+    recordings: list[Recording] = field(default_factory=list)
+    open_id: int = 0
+    recording_byte: int | None = None
+    listed: bool = False
+    deleted: set[int] = field(default_factory=set)
+    commands: list[tuple[int, int]] = field(default_factory=list)
+
+
+class CleanupHooks:
+    """What the bridge asks about the recordings it made as a microphone.
+    Called on the bridge thread; the default keeps nothing and deletes nothing."""
+
+    def enabled(self) -> bool:
+        return False
+
+    def pending(self) -> list[int]:
+        return []
+
+    def streamed(self, file_id: int) -> None:
+        return None
+
+    def gone(self, file_ids: set[int]) -> None:
+        return None
+
+
 class _UserStop(Exception):
     pass
 
@@ -91,8 +137,11 @@ class _Runner:
         sink=None,
         stop=None,
         on_rearm=None,
+        cleanup: CleanupHooks | None = None,
     ):
         self.link = link
+        self.cleanup = cleanup
+        self._streamed: set[int] = set()
         self.decoder = decoder
         self.deadline = deadline
         self.pcm_timeout = pcm_timeout
@@ -298,6 +347,9 @@ class _Runner:
                     self._consume_pcm(pcm)
                     played_up_to = sequence + 1
                     self._played[file_id] = played_up_to
+                    if self.cleanup is not None and file_id not in self._streamed:
+                        self._streamed.add(file_id)
+                        self.cleanup.streamed(file_id)
                 continue
             if packet.cmd_type == 0x1A and packet.cmd_id == 0x0A:
                 self._peer_finished = True
@@ -308,40 +360,104 @@ class _Runner:
             return
         self.result.stop_reason = "duration_cap" if self._pcm_frames else "no_valid_pcm"
 
+    async def _greet(self) -> str:
+        """Device info, then the handshake. Returns "" or a stop reason."""
+        if self._overflow() or self._timed_out():
+            return "timeout"
+        await self._write(device_info_request())
+        info_packet = await self._wait_for(0x01, 0x01, self._command_window())
+        if info_packet is None:
+            return "timeout"
+        if info_packet.rejected or not info_packet.success:
+            return "refused"
+        info = parse_device_info(info_packet.payload)
+        if info is None:
+            return "protocol_error"
+        self._remember_info(info)
+        if self._timed_out():
+            return "timeout"
+
+        await self._write(handshake_request(self.crypto.public_uncompressed()))
+        shake = await self._wait_for(0x2E, 0x01, self._command_window())
+        if shake is None:
+            return "timeout"
+        if shake.rejected or not shake.success:
+            return "refused"
+        material = parse_handshake(shake.payload)
+        if material is None or not self.crypto.complete(material[0], material[1]):
+            return "crypto_failure"
+        return ""
+
+    async def list_recordings(self) -> tuple[list[Recording], int] | None:
+        """Every recording on the device and the id of the open one (or 0).
+        None if the device did not answer every page."""
+        found: dict[int, Recording] = {}
+        open_id = 0
+        for page in range(MAX_LIST_PAGES):
+            await self._write(list_request(page))
+            packet = await self._wait_for(0x1B, 0x0E, self._command_window())
+            if packet is None or packet.rejected:
+                return None
+            parsed = parse_recording_page(packet.payload)
+            if parsed is None:
+                return None
+            open_id = parsed.open_id or open_id
+            added = False
+            for item in parsed.recordings:
+                if item.file_id not in found:
+                    found[item.file_id] = item
+                    added = True
+            if len(parsed.recordings) < LIST_PAGE_SIZE or not added:
+                return list(found.values()), open_id
+        return None
+
+    async def delete_recordings(self, wanted: list[int]) -> tuple[set[int], tuple[list[Recording], int] | None]:
+        """Delete the wanted files that are on the device and not open.
+
+        Returns the wanted ids that are no longer on the device, and the
+        listing taken afterwards (None if it could not be read)."""
+        wanted = [item for item in dict.fromkeys(wanted) if item]
+        if not wanted:
+            return set(), None
+        listing = None
+        for attempt in range(OPEN_FILE_RETRIES + 1):
+            listing = await self.list_recordings()
+            if listing is None:
+                return set(), None
+            if listing[1] not in wanted or attempt == OPEN_FILE_RETRIES:
+                break
+            await asyncio.sleep(OPEN_FILE_WAIT)
+        recordings, open_id = listing
+        present = {item.file_id for item in recordings}
+        targets = [item for item in wanted if item in present and item != open_id]
+        for file_id in targets:
+            await self._write(delete_request(file_id))
+            await self._wait_for(0x1A, 0x10, self._command_window())
+        after = await self.list_recordings() if targets else listing
+        # A file that has just started is open but not listed yet.
+        if after is None:
+            return {item for item in wanted if item not in present and item != open_id}, None
+        still = {item.file_id for item in after[0]} | {after[1], open_id}
+        return {item for item in wanted if item not in still}, after
+
+    async def _auto_clean(self) -> None:
+        hooks = self.cleanup
+        if hooks is None or not hooks.enabled():
+            return
+        pending = hooks.pending()
+        if not pending:
+            return
+        gone, _listing = await self.delete_recordings(pending)
+        if gone:
+            hooks.gone(gone)
+
     async def run(self) -> SessionResult:
         try:
-            if self._overflow() or self._timed_out():
-                self.result.stop_reason = "timeout"
+            reason = await self._greet()
+            if reason:
+                self.result.stop_reason = reason
                 return self.result
-            await self._write(device_info_request())
-            info_packet = await self._wait_for(0x01, 0x01, self._command_window())
-            if info_packet is None:
-                self.result.stop_reason = "timeout"
-                return self.result
-            if info_packet.rejected or not info_packet.success:
-                self.result.stop_reason = "refused"
-                return self.result
-            info = parse_device_info(info_packet.payload)
-            if info is None:
-                self.result.stop_reason = "protocol_error"
-                return self.result
-            self._remember_info(info)
-            if self._timed_out():
-                self.result.stop_reason = "timeout"
-                return self.result
-
-            await self._write(handshake_request(self.crypto.public_uncompressed()))
-            shake = await self._wait_for(0x2E, 0x01, self._command_window())
-            if shake is None:
-                self.result.stop_reason = "timeout"
-                return self.result
-            if shake.rejected or not shake.success:
-                self.result.stop_reason = "refused"
-                return self.result
-            material = parse_handshake(shake.payload)
-            if material is None or not self.crypto.complete(material[0], material[1]):
-                self.result.stop_reason = "crypto_failure"
-                return self.result
+            await self._auto_clean()
 
             while True:
                 file_id = await self._wait_file()
@@ -365,6 +481,7 @@ class _Runner:
                 self._peer_finished = False
                 self.active_file_id = None
                 self._on_rearm()
+                await self._auto_clean()
         except _UserStop:
             self.result.stop_reason = "stopped"
             return self.result
@@ -435,10 +552,12 @@ async def run_diagnostic(
     sink=None,
     stop=None,
     on_rearm=None,
+    cleanup: CleanupHooks | None = None,
 ) -> SessionResult:
     """Run one session. on_rearm, if given, keeps the connection after the
     device ends a transfer and is called each time the session goes back to
-    waiting for the next recording."""
+    waiting for the next recording. cleanup, if given, deletes the
+    recordings streamed as a microphone (see CleanupHooks)."""
     runner = _Runner(
         link,
         decoder,
@@ -448,5 +567,53 @@ async def run_diagnostic(
         sink=sink,
         stop=stop,
         on_rearm=on_rearm,
+        cleanup=cleanup,
     )
     return await runner.run()
+
+
+async def manage_recordings(
+    link,
+    *,
+    delete: list[int] | tuple[int, ...] = (),
+    command_timeout: float = 5.0,
+    stop=None,
+) -> RecordingsResult:
+    """Open the device, delete the given recordings, and list what is left.
+
+    Nothing else is sent: no transfer, no recording control."""
+    runner = _Runner(link, None, None, None, command_timeout, stop=stop)
+    out = RecordingsResult(stop_reason="protocol_error")
+    try:
+        reason = await runner._greet()
+        out.recording_byte = runner.result.recording_byte
+        if reason:
+            out.stop_reason = reason
+            return out
+        listing = None
+        if delete:
+            out.deleted, listing = await runner.delete_recordings(list(delete))
+        if listing is None:
+            listing = await runner.list_recordings()
+        if listing is None:
+            out.stop_reason = "timeout"
+            return out
+        out.recordings, out.open_id = listing
+        out.listed = True
+        out.stop_reason = "done"
+        return out
+    except _UserStop:
+        out.stop_reason = "stopped"
+        return out
+    except LinkClosed:
+        out.stop_reason = "disconnected"
+        return out
+    except ProtocolError:
+        out.stop_reason = "protocol_error"
+        return out
+    except Exception:
+        out.stop_reason = "link_error"
+        return out
+    finally:
+        out.commands = list(runner.result.commands)
+        await runner._cleanup()

@@ -5,7 +5,9 @@ address the operator typed. It sends device info, the ECDH handshake, and one
 realtime transfer request for the file id carried by notification 1A/06.
 Cleanup sends 1A/11 only after that request, then disconnects. The tray bridge
 keeps the connection when the device ends a transfer, and asks again only
-after the next 1A/06. It never sends recording start, pause, or stop.
+after the next 1A/06. With cleanup hooks it lists and deletes the recordings
+it streamed; run_recordings() connects only to list or delete recordings for
+the cleanup window. It never sends recording start, pause, or stop.
 """
 
 from __future__ import annotations
@@ -377,7 +379,78 @@ async def run_address(address: str, seconds: int | None, to_cable: bool = False)
 
 
 
-async def run_cable_session(stop=None, on_status=None) -> int:
+async def _connect_nearest(status, should_stop):
+    """Scan once, connect to the strongest D3200 and subscribe.
+    Returns the link, or None after reporting why not."""
+    from bleak import BleakClient, BleakScanner
+
+    status("正在扫描录音豆…")
+    found = await _discover(BleakScanner, SCAN_SECONDS, should_stop)
+    if should_stop():
+        status("已取消，未连接。")
+        return None
+    matches = []
+    for _address, (candidate, adv) in found.items():
+        if _is_d3200(adv):
+            rssi = adv.rssi if adv.rssi is not None else -999
+            matches.append((rssi, candidate))
+    if not matches:
+        status("没有找到录音豆。请把它靠近电脑，并先断开手机上的连接后再试。")
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    status("已找到录音豆，正在连接…")
+    client = BleakClient(
+        matches[0][1],
+        pair=False,
+        timeout=10.0,
+        services=[D3200_SERVICE],
+    )
+    link = BleakLink(client)
+    try:
+        await client.connect()
+        if should_stop():
+            status("已取消，已断开。")
+            await link.close()
+            return None
+        if not await link.prepare():
+            status("设备特征不匹配，已断开。未发送录音控制。")
+            await link.close()
+            return None
+    except Exception:
+        await link.close()
+        raise
+    return link
+
+
+async def run_recordings(delete=(), stop=None, on_status=None):
+    """Connect, delete the given recordings, list what is left, disconnect.
+
+    Returns a RecordingsResult, or None if no connection was made."""
+    from soundcore_diag.session import manage_recordings
+
+    def status(message: str) -> None:
+        if on_status is not None:
+            on_status(message)
+
+    def should_stop() -> bool:
+        return stop is not None and stop()
+
+    _ensure_windows_mta()
+    try:
+        link = await _connect_nearest(status, should_stop)
+    except Exception:
+        status("连接失败。请把录音豆靠近电脑，断开手机上的连接后再试。")
+        return None
+    if link is None:
+        return None
+    try:
+        status("正在删除所选录音…" if delete else "正在读取豆里的录音…")
+        return await manage_recordings(link, delete=list(delete), command_timeout=5.0, stop=should_stop)
+    finally:
+        await link.close()
+
+
+async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
     """Scan, pick the nearest D3200, and bridge until stop() is true.
 
     Status messages never include Bluetooth addresses. This does not change
@@ -439,8 +512,6 @@ async def run_cable_session(stop=None, on_status=None) -> int:
             sink.rearm()
             status("录音已暂停，连接还在。再按一下录音豆上的录音键，就会接着传声。")
 
-        from bleak import BleakClient, BleakScanner
-
         flag = {"stop": False}
         loop = asyncio.get_running_loop()
         restore_signal = _install_stop(loop, flag)
@@ -451,37 +522,14 @@ async def run_cable_session(stop=None, on_status=None) -> int:
         if should_stop():
             status("已取消，未连接。")
             return 2
-        status("正在扫描录音豆…")
-        found = await _discover(BleakScanner, SCAN_SECONDS, should_stop)
-        if should_stop():
-            status("已取消，未连接。")
-            return 2
-        matches = []
-        for _address, (candidate, adv) in found.items():
-            if _is_d3200(adv):
-                rssi = adv.rssi if adv.rssi is not None else -999
-                matches.append((rssi, candidate))
-        if not matches:
-            status("没有找到录音豆。请把它靠近电脑，并先断开手机上的连接后再试。")
-            return 2
-        matches.sort(key=lambda item: item[0], reverse=True)
-        device = matches[0][1]
-        status("已找到录音豆，正在连接…")
-        client = BleakClient(
-            device,
-            pair=False,
-            timeout=10.0,
-            services=[D3200_SERVICE],
-        )
-        link = BleakLink(client)
         try:
-            await client.connect()
-            if should_stop():
-                status("已取消，已断开。")
-                return 2
-            if not await link.prepare():
-                status("设备特征不匹配，已断开。未发送录音控制。")
-                return 2
+            link = await _connect_nearest(status, should_stop)
+        except Exception:
+            status("连接或传输失败，已停止。没有改试其他认证或协议。")
+            return 2
+        if link is None:
+            return 2
+        try:
             status("已连上。请按下录音豆上的录音键，灯变色后对着它说话。")
             result = await run_diagnostic(
                 link,
@@ -492,6 +540,7 @@ async def run_cable_session(stop=None, on_status=None) -> int:
                 sink=sink,
                 stop=should_stop,
                 on_rearm=_on_rearm,
+                cleanup=cleanup,
             )
             _print_result(result)
             reason = _REASONS.get(result.stop_reason, "已停止")

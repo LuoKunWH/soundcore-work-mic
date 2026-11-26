@@ -7,6 +7,8 @@
 - 版权：Copyright (c) 2026 Rocky Shi
 - 许可：MIT，全文见 `third_party/licenses/tacshi-Soundcore-MIT-d296a1c.txt`
 
+录音列表（`1B/0E`）和删除（`1A/10`）的帧格式参照 imraywang/openbean（Apache-2.0）提交 `6f56b89` 的 `docs/PROTOCOL.md` 第 7、12a 节，在本目录中独立实现，没有收录它的代码。
+
 ozil56/SoundcoreForWindows 在 `3ea51c739a937f144be9c62a4a0b7e103ba3df03` 没有仓库级许可证。本目录没有收录或改写它的 Python 实现。
 
 Windows 依赖从 PyPI 的官方 wheel 钉死，文件在 `third_party/wheels`，哈希同时写在 `requirements-windows.txt` 和 `third_party/wheels/SHA256SUMS`。安装命令使用 `--require-hashes --no-index --find-links`，不从网络重新解析版本。
