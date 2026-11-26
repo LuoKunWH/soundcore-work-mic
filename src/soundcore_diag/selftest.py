@@ -15,8 +15,12 @@ from soundcore_diag.cable import (
     MISSING_TEXT,
     CableMissing,
     OutputDevice,
+    Pcm16Resampler,
     expand_pcm,
     is_standard_cable_input,
+    is_standard_cable_output,
+    pcm_peak,
+    playback_rates,
     select_cable_input,
 )
 from soundcore_diag.crypto_session import FILE_MAGIC, SessionCrypto, aes_ctr, derive_session_key
@@ -425,6 +429,19 @@ def _check_cable() -> None:
         raise AssertionError("ambiguous cable was accepted")
     assert expand_pcm(b"\x01\x00\x02\x00", 2) == b"\x01\x00\x01\x00\x02\x00\x02\x00"
     assert expand_pcm(b"\x01\x00", 1) == b"\x01\x00"
+    assert not is_standard_cable_input("CABLE In 16ch")
+    assert not is_standard_cable_input("CABLE In 16ch (VB-Audio Virtual Cable)")
+    assert not is_standard_cable_input("CABLE Input 16ch")
+    assert not is_standard_cable_output("CABLE Out 16ch")
+    assert playback_rates(48000) == [48000, 16000]
+    assert playback_rates(16000) == [16000]
+    assert playback_rates(0) == [16000]
+    tone = (1000).to_bytes(2, "little", signed=True) * 160
+    assert pcm_peak(tone) == 1000
+    assert pcm_peak(bytes(320)) == 0
+    played = Pcm16Resampler(16000, 48000).feed(tone)
+    assert pcm_peak(played) == 1000
+    assert pcm_peak(Pcm16Resampler(16000, 48000).feed(bytes(320))) == 0
 
 
 def _snapshot() -> set[str]:

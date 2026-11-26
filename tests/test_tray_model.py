@@ -70,7 +70,7 @@ class TrayModelTests(unittest.TestCase):
             "桥接已停止（链路断开）。请再按一下豆上的键停掉录音。",
             MISSING_TEXT,
             "找到多个标准 CABLE Input 播放端，没有自动挑选。\n" + MISSING_TEXT,
-            "无法以 16000 Hz 打开 CABLE Input。没有改用其他采样率，也没有修改系统默认设备。",
+            "无法打开 CABLE Input。已尝试该播放端当前的采样率和 16000 Hz，没有修改系统默认设备。",
             "检测到 SD_ENABLE_ASIO。本程序不加载 ASIO 版 PortAudio，也没有打开声卡。",
             model.CRASHED,
             "某个没有见过的失败",

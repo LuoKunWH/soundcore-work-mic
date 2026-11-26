@@ -17,7 +17,7 @@ import sys
 import signal
 import time
 
-from soundcore_diag.cable import CableMissing, CableUnavailable, open_cable_input
+from soundcore_diag.cable import CableMissing, CableUnavailable, open_cable_input, pcm_peak
 from soundcore_diag.harness import LinkClosed
 from soundcore_diag.opus_pcm import OpusPcmDecoder, OpusUnavailable
 from soundcore_diag.protocol import assert_tx_frame
@@ -272,7 +272,7 @@ async def run_address(address: str, seconds: int | None, to_cable: bool = False)
                 print(str(exc))
                 return 2
             print(
-                f"已打开播放端 {sink.name}（{sink.hostapi}，{sink.channels} 声道，16000 Hz）。"
+                f"已打开播放端 {sink.name}（{sink.hostapi}，{sink.channels} 声道，{sink.samplerate} Hz）。"
             )
             print("其他程序请把麦克风选成 CABLE Output。本程序只写 CABLE Input。")
             print("没有修改系统默认扬声器或麦克风。")
@@ -344,7 +344,7 @@ async def run_address(address: str, seconds: int | None, to_cable: bool = False)
                     print("桥接从现在开始，直到你按 Ctrl+C。扫描和连接不占用这段时间。")
                 else:
                     print(f"桥接从现在开始，最长 {seconds} 秒。Ctrl+C 可以提前结束。")
-                print("单声道 PCM 在双声道端点上会复制到左右声道。采样率保持 16000 Hz。")
+                print("单声道 PCM 在双声道端点上会复制到左右声道。录音是 16000 Hz，按播放端当前采样率写入。")
             result = await run_diagnostic(
                 link,
                 decoder,
@@ -369,6 +369,9 @@ async def run_address(address: str, seconds: int | None, to_cable: bool = False)
             await link.close()
     finally:
         if sink is not None:
+            stats = getattr(sink, "stats_line", None)
+            if callable(stats):
+                print(stats())
             sink.close()
         if restore_signal is not None:
             try:
@@ -450,17 +453,28 @@ async def run_recordings(delete=(), stop=None, on_status=None):
         await link.close()
 
 
-async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
+async def run_cable_session(stop=None, on_status=None, cleanup=None, on_log=None) -> int:
     """Scan, pick the nearest D3200, and bridge until stop() is true.
 
     Status messages never include Bluetooth addresses. This does not change
-    the system default playback or recording devices.
+    the system default playback or recording devices. on_log receives the
+    cable open line and PCM levels; the tray passes its tray.log logger
+    because pythonw discards stdout.
     """
 
     def status(message: str) -> None:
         if on_status is not None:
             on_status(message)
         print(message)
+
+    def emit(message: str) -> None:
+        if on_log is not None:
+            try:
+                on_log(message)
+            except Exception:
+                pass
+        else:
+            print(message)
 
     try:
         decoder = OpusPcmDecoder()
@@ -473,7 +487,7 @@ async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
         try:
             _ensure_windows_mta()
             status("正在打开虚拟声卡…")
-            sink = open_cable_input()
+            sink = open_cable_input(log=emit)
         except CableMissing as exc:
             status(str(exc))
             return 2
@@ -492,13 +506,19 @@ async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
                 self.channels = inner.channels
 
             def write(self, mono_pcm: bytes) -> None:
-                if not self._sent:
+                self._inner.write(mono_pcm)
+                # Length alone is not sound: a silent Opus frame still has
+                # samples. Switch the tray to "transmitting" only after a
+                # nonzero sample has actually been queued.
+                if not self._sent and pcm_peak(mono_pcm) > 0:
                     self._sent = True
                     self._notify()
-                self._inner.write(mono_pcm)
 
             def rearm(self) -> None:
                 self._sent = False
+
+            def stats_line(self) -> str:
+                return self._inner.stats_line()
 
             def close(self) -> None:
                 self._inner.close()
@@ -543,6 +563,12 @@ async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
                 cleanup=cleanup,
             )
             _print_result(result)
+            emit(
+                "pcm summary "
+                f"frames={result.pcm_frames} samples={result.pcm_samples} "
+                f"peak={result.peak_abs} rms={result.rms:.1f} "
+                f"writes={result.cable_writes} reason={result.stop_reason}"
+            )
             reason = _REASONS.get(result.stop_reason, "已停止")
             if result.stop_reason == "stopped":
                 status("桥接已停止。请再按一下录音豆上的键，把豆上的录音停掉。")
@@ -568,6 +594,12 @@ async def run_cable_session(stop=None, on_status=None, cleanup=None) -> int:
             await link.close()
     finally:
         if sink is not None:
+            stats = getattr(sink, "stats_line", None)
+            if callable(stats):
+                try:
+                    emit(stats())
+                except Exception:
+                    pass
             sink.close()
         if restore_signal is not None:
             try:
