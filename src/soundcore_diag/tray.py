@@ -420,7 +420,14 @@ class TrayApp:
 
         try:
             self._log("worker start")
-            code = asyncio.run(run_cable_session(stop=stop, on_status=self._on_status, cleanup=self.store))
+            code = asyncio.run(
+                run_cable_session(
+                    stop=stop,
+                    on_status=self._on_status,
+                    cleanup=self.store,
+                    on_log=self._log,
+                )
+            )
             self._log(f"worker return {code}")
         except Exception:
             self._log("worker exception\n" + traceback.format_exc())
